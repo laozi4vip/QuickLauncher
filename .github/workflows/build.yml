@@ -23,26 +23,22 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install nuitka pywin32 psutil wxpython
+        pip install cx_Freeze pywin32 psutil wxpython
     
     - name: Build EXE
       run: |
-        python -m nuitka --standalone --onefile --windows-disable-console --output-dir=dist main/main.py
-    
-    - name: List output
-      run: |
-        dir dist
+        python -m cx_Freeze build_exe --target-name QuickLauncher.exe
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: QuickLauncher
-        path: dist/main.exe
+        path: build/QuickLauncher.exe
     
     - name: Create Release
       uses: softprops/action-gh-release@v2
       if: startsWith(github.ref, 'refs/tags/v')
       with:
-        files: dist/main.exe
+        files: build/QuickLauncher.exe
         draft: false
         prerelease: false
