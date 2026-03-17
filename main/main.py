@@ -79,7 +79,9 @@ def find_window(exe_name):
     if candidate_hwnds:
         return candidate_hwnds[0]
     
-    return Nonedef minimize_window(hwnd):
+    return None
+
+def minimize_window(hwnd):
     try:
         user32.ShowWindow(hwnd, SW_MINIMIZE)
     except:
