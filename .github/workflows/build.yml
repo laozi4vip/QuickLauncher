@@ -6,6 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -20,33 +23,22 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install pyinstaller pywin32 psutil wxpython
+        pip install pywin32 psutil wxpython
     
     - name: Build EXE
       run: |
-        echo "Starting build..."
-        pyinstaller --version
         pyinstaller --onefile --windowed --name QuickLauncher main/main.py
-        echo "Checking output..."
-        if (Test-Path "dist\QuickLauncher.exe") {
-            Write-Host "SUCCESS: Build output found"
-            Get-ChildItem "dist"
-            Copy-Item "dist\QuickLauncher.exe" .
-        } else {
-            Write-Host "ERROR: Build output not found"
-            Get-ChildItem
-            exit 1
-        }
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: QuickLauncher
-        path: QuickLauncher.exe
+        path: dist/QuickLauncher.exe
     
     - name: Create Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       if: startsWith(github.ref, 'refs/tags/v')
       with:
-        files: QuickLauncher.exe
-        token: ${{ secrets.GITHUB_TOKEN }}
+        files: dist/QuickLauncher.exe
+        draft: false
+        prerelease: false
