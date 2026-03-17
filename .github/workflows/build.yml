@@ -32,17 +32,22 @@ jobs:
     - name: List build output
       run: |
         dir build
+        dir build\exe.win*
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: QuickLauncher
-        path: build/QuickLauncher.exe
+        path: |
+          build/QuickLauncher.exe
+          build/exe.win*/QuickLauncher.exe
     
     - name: Create Release
       uses: softprops/action-gh-release@v2
       if: startsWith(github.ref, 'refs/tags/v')
       with:
-        files: build/QuickLauncher.exe
+        files: |
+          build/QuickLauncher.exe
+          build/exe.win*/QuickLauncher.exe
         draft: false
         prerelease: false
