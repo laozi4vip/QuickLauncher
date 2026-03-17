@@ -155,9 +155,13 @@ class QuickLauncherFrame(wx.Frame):
         # 按钮
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
-        add_btn = wx.Button(panel, label="从运行程序添加")
-        add_btn.Bind(wx.EVT_BUTTON, self.on_add_from_running)
+        add_btn = wx.Button(panel, label="手动添加")
+        add_btn.Bind(wx.EVT_BUTTON, self.on_manual_add)
         btn_sizer.Add(add_btn, 0, wx.ALL, 5)
+        
+        add_running_btn = wx.Button(panel, label="从运行程序添加")
+        add_running_btn.Bind(wx.EVT_BUTTON, self.on_add_from_running)
+        btn_sizer.Add(add_running_btn, 0, wx.ALL, 5)
         
         del_btn = wx.Button(panel, label="删除")
         del_btn.Bind(wx.EVT_BUTTON, self.on_delete)
@@ -185,6 +189,64 @@ class QuickLauncherFrame(wx.Frame):
         self.list_ctrl.DeleteAllItems()
         for i, p in enumerate(self.programs):
             self.list_ctrl.Append([p.get('name', ''), p.get('hotkey', ''), p.get('path', '')])
+    
+    def on_manual_add(self, event):
+        """手动添加程序"""
+        dialog = wx.Dialog(self, title="添加程序", size=(500, 180))
+        panel = wx.Panel(dialog)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # 程序名称
+        name_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        name_sizer.Add(wx.StaticText(panel, label="程序名称:"), 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+        name_ctrl = wx.TextCtrl(panel, size=(300, -1))
+        name_sizer.Add(name_ctrl, 1, wx.EXPAND|wx.ALL, 5)
+        sizer.Add(name_sizer, 0, wx.EXPAND|wx.ALL, 5)
+        
+        # 程序路径
+        path_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        path_sizer.Add(wx.StaticText(panel, label="程序路径:"), 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
+        path_ctrl = wx.TextCtrl(panel, size=(250, -1))
+        path_sizer.Add(path_ctrl, 1, wx.EXPAND|wx.ALL, 5)
+        
+        def on_browse(event):
+            dlg = wx.FileDialog(panel, "选择程序", wildcard="*.exe", style=wx.FD_OPEN)
+            if dlg.ShowModal() == wx.ID_OK:
+                path_ctrl.SetValue(dlg.GetPath())
+                if not name_ctrl.GetValue():
+                    name_ctrl.SetValue(os.path.basename(dlg.GetPath()).replace('.exe', ''))
+            dlg.Destroy()
+        
+        browse_btn = wx.Button(panel, label="浏览")
+        browse_btn.Bind(wx.EVT_BUTTON, on_browse)
+        path_sizer.Add(browse_btn, 0, wx.ALL, 5)
+        sizer.Add(path_sizer, 0, wx.EXPAND|wx.ALL, 5)
+        
+        def on_ok(event):
+            name = name_ctrl.GetValue().strip()
+            path = path_ctrl.GetValue().strip()
+            if name and path:
+                self.programs.append({
+                    'name': name,
+                    'path': path,
+                    'hotkey': ''
+                })
+                save_config(self.programs)
+                self.refresh_list()
+                self.restart_hotkey_listener()
+                dialog.Destroy()
+        
+        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        ok_btn = wx.Button(panel, wx.ID_OK, "添加")
+        ok_btn.Bind(wx.EVT_BUTTON, on_ok)
+        cancel_btn = wx.Button(panel, wx.ID_CANCEL, "取消")
+        cancel_btn.Bind(wx.EVT_BUTTON, lambda e: dialog.Destroy())
+        btn_sizer.Add(ok_btn, 0, wx.ALL, 5)
+        btn_sizer.Add(cancel_btn, 0, wx.ALL, 5)
+        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER|wx.ALL, 5)
+        
+        panel.SetSizer(sizer)
+        dialog.ShowModal()
     
     def on_add_from_running(self, event):
         """从运行程序添加"""
