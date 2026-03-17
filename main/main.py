@@ -107,17 +107,23 @@ def toggle_program(program):
     if not path:
         return False
     
-    exe_name = os.path.basename(path).lower()
+    exe_name = os.path.basename(path).lower().replace('.exe', '')
+    print(f"Toggle: {exe_name}, path: {path}")
+    
     hwnd = find_window(exe_name)
+    print(f"Found hwnd: {hwnd}")
     
     if hwnd:
         if is_minimized(hwnd):
+            print("Restoring window")
             restore_window(hwnd)
         else:
+            print("Minimizing window")
             minimize_window(hwnd)
         return True
     else:
         # 启动程序
+        print("Launching program")
         if os.path.exists(path):
             subprocess.Popen(path)
             return True
@@ -408,12 +414,15 @@ class QuickLauncherFrame(wx.Frame):
                     if modifiers:
                         expected = '+'.join(modifiers) + '+' + key_name
                         
+                        print(f"Pressed: {expected}")
+                        
                         # 检查冷却
                         last_time = last_triggered.get(expected, 0)
                         if now - last_time > cooldown:
                             # 匹配并触发
                             for program in programs:
                                 hotkey = program.get('hotkey', '').lower().replace(' ', '')
+                                print(f"Matching: {hotkey} == {expected} ? {hotkey == expected}")
                                 if hotkey == expected:
                                     toggle_program(program)
                                     last_triggered[expected] = now
