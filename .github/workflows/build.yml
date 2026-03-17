@@ -23,7 +23,7 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install pyinstaller pywin32 psutil wxpython pynput
+        pip install pyinstaller pywin32 psutil wxpython
     
     - name: Build EXE
       run: |

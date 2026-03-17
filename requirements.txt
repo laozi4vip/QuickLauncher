@@ -1,4 +1,3 @@
 wxpython
 psutil
-pynput
 pywin32
