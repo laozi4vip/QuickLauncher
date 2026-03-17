@@ -49,15 +49,20 @@ def save_config(programs):
 
 def find_window(exe_name):
     """根据exe名称查找窗口"""
-    exe_name = exe_name.lower()
+    exe_name = exe_name.lower().replace('.exe', '')
+    print(f"Finding window for: {exe_name}")
+    
+    # 获取所有可见窗口
     windows = []
     
     def callback(hwnd, wins):
         try:
-            if hwnd and user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
-                length = user32.GetWindowTextLengthW(hwnd)
-                if length > 0:
-                    wins.append(hwnd)
+            if hwnd and user32.IsWindow(hwnd):
+                # 检查窗口是否可见
+                if user32.IsWindowVisible(hwnd):
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        wins.append(hwnd)
         except:
             pass
         return True
@@ -68,10 +73,24 @@ def find_window(exe_name):
     except:
         pass
     
+    print(f"Found {len(windows)} visible windows")
+    
+    # 遍历窗口，查找匹配的进程
     for hwnd in windows:
         pid = ctypes.c_ulong()
         try:
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            proc = psutil.Process(pid.value)
+            proc_name = proc.name().lower().replace('.exe', '')
+            print(f"  Checking: {proc_name} == {exe_name} ?")
+            if exe_name in proc_name or proc_name in exe_name:
+                print(f"  MATCH! hwnd={hwnd}")
+                return hwnd
+        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception) as e:
+            pass
+    
+    print("No matching window found")
+    return None
             proc = psutil.Process(pid.value)
             if exe_name in proc.name().lower():
                 return hwnd
