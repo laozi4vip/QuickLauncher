@@ -44,13 +44,10 @@ def save_config(programs):
     """保存配置"""
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump({'programs': programs}, f, ensure_ascii=False, indent=4)
-    print(f"Config saved to: {CONFIG_FILE}")
-    print(f"Programs: {programs}")
 
 def find_window(exe_name):
     """根据exe名称查找窗口"""
     exe_name = exe_name.lower().replace('.exe', '')
-    print(f"Finding window for: {exe_name}")
     
     # 获取所有可见窗口
     windows = []
@@ -58,7 +55,6 @@ def find_window(exe_name):
     def callback(hwnd, wins):
         try:
             if hwnd and user32.IsWindow(hwnd):
-                # 检查窗口是否可见
                 if user32.IsWindowVisible(hwnd):
                     length = user32.GetWindowTextLengthW(hwnd)
                     if length > 0:
@@ -73,8 +69,6 @@ def find_window(exe_name):
     except:
         pass
     
-    print(f"Found {len(windows)} visible windows")
-    
     # 遍历窗口，查找匹配的进程
     for hwnd in windows:
         pid = ctypes.c_ulong()
@@ -82,14 +76,11 @@ def find_window(exe_name):
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             proc = psutil.Process(pid.value)
             proc_name = proc.name().lower().replace('.exe', '')
-            print(f"  Checking: {proc_name} == {exe_name} ?")
             if exe_name in proc_name or proc_name in exe_name:
-                print(f"  MATCH! hwnd={hwnd}")
                 return hwnd
-        except (psutil.NoSuchProcess, psutil.AccessDenied, Exception) as e:
+        except:
             pass
     
-    print("No matching window found")
     return None
             proc = psutil.Process(pid.value)
             if exe_name in proc.name().lower():
@@ -127,22 +118,17 @@ def toggle_program(program):
         return False
     
     exe_name = os.path.basename(path).lower().replace('.exe', '')
-    print(f"Toggle: {exe_name}, path: {path}")
     
     hwnd = find_window(exe_name)
-    print(f"Found hwnd: {hwnd}")
     
     if hwnd:
         if is_minimized(hwnd):
-            print("Restoring window")
             restore_window(hwnd)
         else:
-            print("Minimizing window")
             minimize_window(hwnd)
         return True
     else:
         # 启动程序
-        print("Launching program")
         if os.path.exists(path):
             subprocess.Popen(path)
             return True
@@ -402,9 +388,6 @@ class QuickLauncherFrame(wx.Frame):
             
             # 每次循环都重新加载配置
             programs = load_config()
-            if not programs:
-                time.sleep(0.1)
-                continue
             
             # 检测所有按键
             for vk, key_name in [
@@ -433,15 +416,12 @@ class QuickLauncherFrame(wx.Frame):
                     if modifiers:
                         expected = '+'.join(modifiers) + '+' + key_name
                         
-                        print(f"Pressed: {expected}")
-                        
                         # 检查冷却
                         last_time = last_triggered.get(expected, 0)
                         if now - last_time > cooldown:
                             # 匹配并触发
                             for program in programs:
                                 hotkey = program.get('hotkey', '').lower().replace(' ', '')
-                                print(f"Matching: {hotkey} == {expected} ? {hotkey == expected}")
                                 if hotkey == expected:
                                     toggle_program(program)
                                     last_triggered[expected] = now
