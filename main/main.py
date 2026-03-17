@@ -180,6 +180,7 @@ class QuickLauncherFrame(wx.Frame):
         panel.SetSizer(sizer)
         
         self.refresh_list()
+        self.Update()
         
         # 启动热键监听
         self.start_hotkey_listener()
@@ -250,6 +251,7 @@ class QuickLauncherFrame(wx.Frame):
                 })
                 Config.save()
                 self.refresh_list()
+                self.list_ctrl.Refresh()
                 self.restart_hotkey_listener()
                 dialog.Destroy()
         
