@@ -221,7 +221,7 @@ class QuickLauncherFrame(wx.Frame):
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
         
-        sizer.Add(wx.StaticText(panel, label="双击选择程序:"), 0, wx.ALL, 5)
+        sizer.Add(wx.StaticText(panel, label="双击选择程序添加:"), 0, wx.ALL, 5)
         
         listbox = wx.ListBox(panel, size=(-1, 300))
         for p in running:
@@ -231,29 +231,24 @@ class QuickLauncherFrame(wx.Frame):
         
         selected = [None]
         
-        def on_select(event):
+        def on_double_click(event):
             selection = listbox.GetSelection()
             if selection != wx.NOT_FOUND:
-                selected[0] = running[selection]
-        
-        listbox.Bind(wx.EVT_LISTBOX_DCLICK, on_select)
-        
-        def ok():
-            if selected[0]:
+                # 双击直接添加
                 self.programs.append({
-                    'name': selected[0]['name'],
-                    'path': selected[0]['path'],
+                    'name': running[selection]['name'],
+                    'path': running[selection]['path'],
                     'hotkey': ''
                 })
                 save_config(self.programs)
                 self.refresh_list()
-                self.list_ctrl.Refresh()
                 self.restart_hotkey_listener()
                 dialog.Destroy()
         
+        listbox.Bind(wx.EVT_LISTBOX_DCLICK, on_double_click)
+        
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        btn_sizer.Add(wx.Button(panel, wx.ID_OK, "确定"), 0, wx.ALL, 5)
-        btn_sizer.Add(wx.Button(panel, wx.ID_CANCEL, "取消"), 0, wx.ALL, 5)
+        btn_sizer.Add(wx.Button(panel, wx.ID_CANCEL, "关闭"), 0, wx.ALL, 5)
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER|wx.ALL, 5)
         
         panel.SetSizer(sizer)
