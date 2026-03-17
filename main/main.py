@@ -333,41 +333,26 @@ class QuickLauncherFrame(wx.Frame):
             wx.MessageBox("请先选择程序", "提示")
             return
         
-        dialog = wx.Dialog(self, title="设置快捷键", size=(350, 150))
-        panel = wx.Panel(dialog)
-        sizer = wx.BoxSizer(wx.VERTICAL)
+        program = self.programs[selection]
+        current_hotkey = program.get('hotkey', '')
         
-        sizer.Add(wx.StaticText(panel, label="输入快捷键 (如 alt+1, ctrl+2, shift+3):"), 0, wx.ALL|wx.ALIGN_CENTER, 10)
+        dlg = wx.TextEntryDialog(
+            self, 
+            f"当前快捷键: {current_hotkey}\n\n输入新快捷键 (如 alt+1, ctrl+a):",
+            "设置快捷键",
+            current_hotkey
+        )
         
-        hotkey_ctrl = wx.TextCtrl(panel, size=(200, 30))
-        sizer.Add(hotkey_ctrl, 0, wx.ALIGN_CENTER|wx.ALL, 10)
-        
-        sizer.Add(wx.StaticText(panel, label="支持的格式: alt+1-9, ctrl+a-z, shift+f1-f12"), 0, wx.ALL|wx.ALIGN_CENTER, 5)
-        
-        def ok():
-            hotkey = hotkey_ctrl.GetValue().strip().lower()
-            if not hotkey:
-                wx.MessageBox("请输入快捷键", "提示")
-                return
-            if selection < len(self.programs):
+        if dlg.ShowModal() == wx.ID_OK:
+            hotkey = dlg.GetValue().strip().lower()
+            if hotkey:
                 self.programs[selection]['hotkey'] = hotkey
                 save_config(self.programs)
                 self.refresh_list()
                 wx.MessageBox(f"已设置快捷键: {hotkey}", "成功")
                 self.restart_hotkey_listener()
-            dialog.Destroy()
         
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        ok_btn = wx.Button(panel, wx.ID_OK, "确定")
-        ok_btn.Bind(wx.EVT_BUTTON, ok)
-        cancel_btn = wx.Button(panel, wx.ID_CANCEL, "取消")
-        cancel_btn.Bind(wx.EVT_BUTTON, lambda e: dialog.Destroy())
-        btn_sizer.Add(ok_btn, 0, wx.ALL, 5)
-        btn_sizer.Add(cancel_btn, 0, wx.ALL, 5)
-        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER|wx.ALL, 10)
-        
-        panel.SetSizer(sizer)
-        dialog.ShowModal()
+        dlg.Destroy()
         dialog.Destroy()
     
     def start_hotkey_listener(self):
