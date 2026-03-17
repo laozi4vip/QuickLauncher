@@ -24,12 +24,17 @@ jobs:
     
     - name: Build EXE
       run: |
+        echo "Starting build..."
+        pyinstaller --version
         pyinstaller --onefile --windowed --name QuickLauncher main/main.py
+        echo "Checking output..."
         if (Test-Path "dist\QuickLauncher.exe") {
+            Write-Host "SUCCESS: Build output found"
+            Get-ChildItem "dist"
             Copy-Item "dist\QuickLauncher.exe" .
-            Write-Host "Build successful"
         } else {
-            Write-Host "Build failed"
+            Write-Host "ERROR: Build output not found"
+            Get-ChildItem
             exit 1
         }
     
