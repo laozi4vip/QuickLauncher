@@ -50,13 +50,14 @@ class Config:
             json.dump({'programs': Config.programs}, f, ensure_ascii=False, indent=4)
 
 def find_window(exe_name):
-    """根据exe名称查找窗口"""
+    """根据exe名称查找窗口（包括最小化的窗口）"""
     exe_name = exe_name.lower()
     windows = []
     
     def callback(hwnd, wins):
         try:
-            if hwnd and user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
+            if hwnd and user32.IsWindow(hwnd):
+                # 检查窗口是否有标题
                 length = user32.GetWindowTextLengthW(hwnd)
                 if length > 0:
                     wins.append(hwnd)
@@ -70,15 +71,30 @@ def find_window(exe_name):
     except:
         pass
     
+    # 优先查找最前面的窗口（非最小化的）
     for hwnd in windows:
-        pid = ctypes.c_ulong()
-        try:
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            proc = psutil.Process(pid.value)
-            if exe_name in proc.name().lower():
-                return hwnd
-        except:
-            pass
+        if user32.IsWindowVisible(hwnd):  # 可见窗口优先
+            pid = ctypes.c_ulong()
+            try:
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                proc = psutil.Process(pid.value)
+                if exe_name in proc.name().lower():
+                    return hwnd
+            except:
+                pass
+    
+    # 如果没找到可见窗口，找最小化的窗口
+    for hwnd in windows:
+        if user32.IsIconic(hwnd):  # 最小化的窗口
+            pid = ctypes.c_ulong()
+            try:
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                proc = psutil.Process(pid.value)
+                if exe_name in proc.name().lower():
+                    return hwnd
+            except:
+                pass
+    
     return None
 
 def is_minimized(hwnd):
