@@ -23,11 +23,11 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install nuitka pywin32 psutil wxpython
+        pip install -r requirements.txt
     
     - name: Build EXE
       run: |
-        python -m nuitka --standalone --onefile --windows-disable-console --output-dir=out main/main.py
+        python -m nuitka --standalone --onefile --mingw64 --assume-yes-for-downloads --windows-disable-console --output-dir=out main/main.py
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
