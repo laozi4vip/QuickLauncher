@@ -1,4 +1,4 @@
-# QuickLauncher 依赖
-psutil
-pywin32
 wxpython
+psutil
+pynput
+pywin32
