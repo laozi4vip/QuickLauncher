@@ -44,6 +44,8 @@ def save_config(programs):
     """保存配置"""
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump({'programs': programs}, f, ensure_ascii=False, indent=4)
+    print(f"Config saved to: {CONFIG_FILE}")
+    print(f"Programs: {programs}")
 
 def find_window(exe_name):
     """根据exe名称查找窗口"""
@@ -344,10 +346,14 @@ class QuickLauncherFrame(wx.Frame):
         
         def ok():
             hotkey = hotkey_ctrl.GetValue().strip().lower()
-            if hotkey and selection < len(self.programs):
+            if not hotkey:
+                wx.MessageBox("请输入快捷键", "提示")
+                return
+            if selection < len(self.programs):
                 self.programs[selection]['hotkey'] = hotkey
                 save_config(self.programs)
                 self.refresh_list()
+                wx.MessageBox(f"已设置快捷键: {hotkey}", "成功")
                 self.restart_hotkey_listener()
             dialog.Destroy()
         
@@ -386,6 +392,9 @@ class QuickLauncherFrame(wx.Frame):
             
             # 每次循环都重新加载配置
             programs = load_config()
+            if not programs:
+                time.sleep(0.1)
+                continue
             
             # 检测所有按键
             for vk, key_name in [
