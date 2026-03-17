@@ -331,39 +331,19 @@ class QuickLauncherFrame(wx.Frame):
             wx.MessageBox("请先选择程序", "提示")
             return
         
-        dialog = wx.Dialog(self, title="设置快捷键", size=(300, 120))
+        dialog = wx.Dialog(self, title="设置快捷键", size=(350, 150))
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
         
-        sizer.Add(wx.StaticText(panel, label="按下快捷键 (如 Alt+1):"), 0, wx.ALL|wx.ALIGN_CENTER, 10)
+        sizer.Add(wx.StaticText(panel, label="输入快捷键 (如 alt+1, ctrl+2, shift+3):"), 0, wx.ALL|wx.ALIGN_CENTER, 10)
         
         hotkey_ctrl = wx.TextCtrl(panel, size=(200, 30))
         sizer.Add(hotkey_ctrl, 0, wx.ALIGN_CENTER|wx.ALL, 10)
         
-        def on_key(event):
-            keys = []
-            key = event.keysym.lower()
-            
-            # 忽略修饰键
-            if key in ('alt_l', 'alt_r', 'shift_l', 'shift_r', 'ctrl_l', 'ctrl_r', 'ctrl', 'shift', 'alt', 'mode'):
-                return
-            
-            # 检测修饰键
-            if event.state & 0x1: keys.append('alt')
-            if event.state & 0x4: keys.append('shift')
-            if event.state & 0x8: keys.append('ctrl')
-            
-            key = key.upper()
-            if key:
-                keys.append(key)
-            
-            if keys:
-                hotkey_ctrl.SetValue('+'.join(keys))
-        
-        hotkey_ctrl.Bind(wx.EVT_KEY_UP, on_key)
+        sizer.Add(wx.StaticText(panel, label="支持的格式: alt+1-9, ctrl+a-z, shift+f1-f12"), 0, wx.ALL|wx.ALIGN_CENTER, 5)
         
         def ok():
-            hotkey = hotkey_ctrl.GetValue().strip()
+            hotkey = hotkey_ctrl.GetValue().strip().lower()
             if hotkey and selection < len(self.programs):
                 self.programs[selection]['hotkey'] = hotkey
                 save_config(self.programs)
@@ -372,9 +352,13 @@ class QuickLauncherFrame(wx.Frame):
             dialog.Destroy()
         
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        btn_sizer.Add(wx.Button(panel, wx.ID_OK, "确定"), 0, wx.ALL, 5)
-        btn_sizer.Add(wx.Button(panel, wx.ID_CANCEL, "取消"), 0, wx.ALL, 5)
-        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER|wx.ALL, 5)
+        ok_btn = wx.Button(panel, wx.ID_OK, "确定")
+        ok_btn.Bind(wx.EVT_BUTTON, ok)
+        cancel_btn = wx.Button(panel, wx.ID_CANCEL, "取消")
+        cancel_btn.Bind(wx.EVT_BUTTON, lambda e: dialog.Destroy())
+        btn_sizer.Add(ok_btn, 0, wx.ALL, 5)
+        btn_sizer.Add(cancel_btn, 0, wx.ALL, 5)
+        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER|wx.ALL, 10)
         
         panel.SetSizer(sizer)
         dialog.ShowModal()
