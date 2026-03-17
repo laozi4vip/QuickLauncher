@@ -387,26 +387,33 @@ class QuickLauncherFrame(wx.Frame):
             # 每次循环都重新加载配置
             programs = load_config()
             
-            # 检测修饰键
-            alt = user32.GetAsyncKeyState(0x12) & 0x8000
-            ctrl = user32.GetAsyncKeyState(0x11) & 0x8000
-            shift = user32.GetAsyncKeyState(0x10) & 0x8000
-            
-            # 检测数字键
-            for i, vk in enumerate([0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30]):
+            # 检测所有按键
+            for vk, key_name in [
+                (0x31, '1'), (0x32, '2'), (0x33, '3'), (0x34, '4'), (0x35, '5'),
+                (0x36, '6'), (0x37, '7'), (0x38, '8'), (0x39, '9'), (0x30, '0'),
+                (0x41, 'a'), (0x42, 'b'), (0x43, 'c'), (0x44, 'd'), (0x45, 'e'),
+                (0x46, 'f'), (0x47, 'g'), (0x48, 'h'), (0x49, 'i'), (0x4A, 'j'),
+                (0x4B, 'k'), (0x4C, 'l'), (0x4D, 'm'), (0x4E, 'n'), (0x4F, 'o'),
+                (0x50, 'p'), (0x51, 'q'), (0x52, 'r'), (0x53, 's'), (0x54, 't'),
+                (0x55, 'u'), (0x56, 'v'), (0x57, 'w'), (0x58, 'x'), (0x59, 'y'),
+                (0x5A, 'z'),
+                (0x70, 'f1'), (0x71, 'f2'), (0x72, 'f3'), (0x73, 'f4'),
+                (0x74, 'f5'), (0x75, 'f6'), (0x76, 'f7'), (0x77, 'f8'),
+                (0x78, 'f9'), (0x79, 'f10'), (0x7A, 'f11'), (0x7B, 'f12'),
+            ]:
                 if user32.GetAsyncKeyState(vk) & 0x8000:
-                    key = str(i % 10)
+                    # 检测修饰键
+                    modifiers = []
+                    if user32.GetAsyncKeyState(0x11) & 0x8000:  # Ctrl
+                        modifiers.append('ctrl')
+                    if user32.GetAsyncKeyState(0x10) & 0x8000:  # Shift
+                        modifiers.append('shift')
+                    if user32.GetAsyncKeyState(0x12) & 0x8000:  # Alt
+                        modifiers.append('alt')
                     
-                    # 构建期望的快捷键
-                    expected = None
-                    if alt:
-                        expected = f"alt+{key}"
-                    elif ctrl:
-                        expected = f"ctrl+{key}"
-                    elif shift:
-                        expected = f"shift+{key}"
-                    
-                    if expected:
+                    if modifiers:
+                        expected = '+'.join(modifiers) + '+' + key_name
+                        
                         # 检查冷却
                         last_time = last_triggered.get(expected, 0)
                         if now - last_time > cooldown:
@@ -420,7 +427,7 @@ class QuickLauncherFrame(wx.Frame):
                                     break
                     break
             
-            time.sleep(0.05)
+            time.sleep(0.02)
 
 def get_process_title(pid):
     """获取进程的窗口标题"""
