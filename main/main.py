@@ -1,14 +1,9 @@
-# -*- coding: utf-8 -*-
 """
 QuickLauncher - Windows任务栏快捷启动器
-
 功能：
-- 绑定程序到快捷键
+- 绑定任务栏程序到快捷键
 - 按快捷键启动或切换窗口
-- 窗口在前台时按快捷键最小化，再按恢复
-
-依赖：
-pip install wxPython psutil pynput
+- 窗口在前台时最小化，再按恢复
 """
 import wx
 import os
@@ -20,18 +15,11 @@ import sys
 import threading
 import time
 
-# =========================
 # Windows API
-# =========================
 user32 = ctypes.windll.user32
-
 SW_MINIMIZE = 6
 SW_RESTORE = 9
 SW_SHOW = 5
-HWND_TOPMOST = -1
-SWP_NOSIZE = 0x0001
-SWP_NOMOVE = 0x0002
-SWP_SHOWWINDOW = 0x0040
 
 # 配置路径
 if getattr(sys, 'frozen', False):
@@ -56,9 +44,11 @@ def save_config(programs):
     """保存配置"""
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump({'programs': programs}, f, ensure_ascii=False, indent=4)
+    print(f"Config saved to: {CONFIG_FILE}")
+    print(f"Programs: {programs}")
 
 def find_window(exe_name):
-    """根据exe名称查找窗口"""
+    """根据exe名称查找窗口（包括最小化的窗口）"""
     exe_name = exe_name.lower()
     windows = []
     
@@ -90,7 +80,7 @@ def find_window(exe_name):
             except:
                 pass
     
-    # 查找最小化窗口
+    # 查找最小化的窗口
     for hwnd in windows:
         if user32.IsIconic(hwnd):
             pid = ctypes.c_ulong()
@@ -115,7 +105,8 @@ def restore_window(hwnd):
         if is_minimized(hwnd):
             user32.ShowWindow(hwnd, SW_RESTORE)
         user32.SetForegroundWindow(hwnd)
-        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        # 置顶
+        user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002)
     except:
         pass
 
@@ -129,19 +120,79 @@ def toggle_program(program):
     """切换程序窗口状态"""
     path = program.get('path', '')
     if not path:
-        return
+        return False
     
     exe_name = os.path.basename(path).lower().replace('.exe', '')
+    print(f"Toggle: {exe_name}, path: {path}")
+    
     hwnd = find_window(exe_name)
+    print(f"Found hwnd: {hwnd}")
     
     if hwnd:
         if is_minimized(hwnd):
+            print("Restoring window")
             restore_window(hwnd)
         else:
+            print("Minimizing window")
             minimize_window(hwnd)
+        return True
     else:
+        # 启动程序
+        print("Launching program")
         if os.path.exists(path):
             subprocess.Popen(path)
+            return True
+    return False
+
+class QuickLauncherFrame(wx.Frame):
+    def __init__(self):
+        super().__init__(None, title="QuickLauncher - 快捷启动器", size=(600, 450))
+        
+        self.programs = load_config()
+        
+        self.init_ui()
+        self.Centre()
+    
+    def init_ui(self):
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # 标题
+        title = wx.StaticText(panel, label="程序列表", style=wx.ALIGN_CENTER)
+        title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        sizer.Add(title, 0, wx.ALL|wx.ALIGN_CENTER, 10)
+        
+        # 说明
+        desc = wx.StaticText(panel, label="设置快捷键来快速启动或切换程序窗口\n窗口在前台时按快捷键会最小化，再按恢复")
+        desc.SetForegroundColour(wx.Colour(100, 100, 100))
+        sizer.Add(desc, 0, wx.ALL|wx.ALIGN_CENTER, 5)
+        
+        # 列表
+        self.list_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT|wx.LC_SINGLE_SEL)
+        self.list_ctrl.InsertColumn(0, "程序名称", width=150)
+        self.list_ctrl.InsertColumn(1, "快捷键", width=100)
+        self.list_ctrl.InsertColumn(2, "程序路径", width=250)
+        
+        sizer.Add(self.list_ctrl, 1, wx.ALL|wx.EXPAND, 5)
+        
+        # 按钮
+        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        add_btn = wx.Button(panel, label="手动添加")
+        add_btn.Bind(wx.EVT_BUTTON, self.on_manual_add)
+        btn_sizer.Add(add_btn, 0, wx.ALL, 5)
+        
+        add_running_btn = wx.Button(panel, label="从运行程序添加")
+        add_running_btn.Bind(wx.EVT_BUTTON, self.on_add_from_running)
+        btn_sizer.Add(add_running_btn, 0, wx.ALL, 5)
+        
+        del_btn = wx.Button(panel, label="删除")
+        del_btn.Bind(wx.EVT_BUTTON, self.on_delete)
+        btn_sizer.Add(del_btn, 0, wx.ALL, 5)
+        
+        set_btn = wx.Button(panel, label="设置快捷键")
+        set_btn.Bind(wx.EVT_BUTTON, self.on_set_hotkey)
+        btn_sizer.Add(set_btn, 0, wx.ALL, 5)
         
         sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER)
         
@@ -153,71 +204,14 @@ def toggle_program(program):
         
         self.refresh_list()
         self.Update()
+        
+        # 启动热键监听
+        self.start_hotkey_listener()
     
     def refresh_list(self):
         self.list_ctrl.DeleteAllItems()
-        for p in self.programs:
+        for i, p in enumerate(self.programs):
             self.list_ctrl.Append([p.get('name', ''), p.get('hotkey', ''), p.get('path', '')])
-    
-    def start_hotkey_listener(self):
-        """启动热键监听线程"""
-        # 停止旧的
-        if self.hotkey_thread and self.hotkey_thread.is_alive():
-            self.running = False
-            time.sleep(0.2)
-        
-        self.running = True
-        
-        # 创建热键字典（只保存路径和名称）
-        self.hotkey_programs = {}
-        for p in self.programs:
-            hotkey = p.get('hotkey', '')
-            if hotkey:
-                self.hotkey_programs[hotkey] = {
-                    'path': p.get('path', ''),
-                    'name': p.get('name', '')
-                }
-        
-        if self.hotkey_programs:
-            self.hotkey_thread = threading.Thread(target=self.hotkey_loop, daemon=True)
-            self.hotkey_thread.start()
-    
-    def hotkey_loop(self):
-        """热键检测循环"""
-        last_triggered = {}
-        cooldown = 500
-        
-        vk_map = {
-            '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34, '5': 0x35,
-            '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39, '0': 0x30,
-        }
-        
-        while self.running:
-            now = time.time() * 1000
-            
-            for vk, key_name in vk_map.items():
-                if user32.GetAsyncKeyState(vk) & 0x8000:
-                    modifiers = []
-                    if user32.GetAsyncKeyState(0x11) & 0x8000:
-                        modifiers.append('ctrl')
-                    if user32.GetAsyncKeyState(0x10) & 0x8000:
-                        modifiers.append('shift')
-                    if user32.GetAsyncKeyState(0x12) & 0x8000:
-                        modifiers.append('alt')
-                    
-                    if modifiers:
-                        expected = '+'.join(modifiers) + '+' + key_name
-                        
-                        last_time = last_triggered.get(expected, 0)
-                        if now - last_time > cooldown:
-                            program = self.hotkey_programs.get(expected)
-                            if program:
-                                toggle_program(program)
-                                last_triggered[expected] = now
-                                wx.CallAfter(self.status_text.SetLabel, f"已切换: {program.get('name', '')}")
-                    break
-            
-            time.sleep(0.02)
     
     def on_manual_add(self, event):
         """手动添加程序"""
@@ -225,12 +219,14 @@ def toggle_program(program):
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
         
+        # 程序名称
         name_sizer = wx.BoxSizer(wx.HORIZONTAL)
         name_sizer.Add(wx.StaticText(panel, label="程序名称:"), 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
         name_ctrl = wx.TextCtrl(panel, size=(300, -1))
         name_sizer.Add(name_ctrl, 1, wx.EXPAND|wx.ALL, 5)
         sizer.Add(name_sizer, 0, wx.EXPAND|wx.ALL, 5)
         
+        # 程序路径
         path_sizer = wx.BoxSizer(wx.HORIZONTAL)
         path_sizer.Add(wx.StaticText(panel, label="程序路径:"), 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL, 5)
         path_ctrl = wx.TextCtrl(panel, size=(250, -1))
@@ -253,10 +249,14 @@ def toggle_program(program):
             name = name_ctrl.GetValue().strip()
             path = path_ctrl.GetValue().strip()
             if name and path:
-                self.programs.append({'name': name, 'path': path, 'hotkey': ''})
+                self.programs.append({
+                    'name': name,
+                    'path': path,
+                    'hotkey': ''
+                })
                 save_config(self.programs)
                 self.refresh_list()
-                self.start_hotkey_listener()
+                self.restart_hotkey_listener()
                 dialog.Destroy()
         
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -275,28 +275,38 @@ def toggle_program(program):
         """从运行程序添加"""
         running = []
         
+        # 获取所有进程
         for proc in psutil.process_iter(['exe', 'pid', 'name']):
             try:
                 exe = proc.info.get('exe')
                 if exe and exe.endswith('.exe'):
                     exe_name = os.path.basename(exe)
-                    if not any(p.get('exe') == exe_name for p in running):
+                    # 避免重复
+                    if not any(p['exe'] == exe_name for p in running):
+                        # 尝试获取窗口标题
                         title = get_process_title(proc.info['pid'])
-                        running.append({'name': exe_name.replace('.exe', ''), 'exe': exe_name, 'path': exe, 'title': title})
-            except:
+                        running.append({
+                            'name': exe_name.replace('.exe', ''),
+                            'exe': exe_name,
+                            'path': exe,
+                            'title': title
+                        })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
         
         if not running:
             wx.MessageBox("没有找到运行的程序", "提示")
             return
         
+        # 排序
         running.sort(key=lambda x: x['title'] or x['name'])
         
+        # 显示选择对话框
         dialog = wx.Dialog(self, title="选择程序", size=(500, 400))
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
         
-        sizer.Add(wx.StaticText(panel, label="双击选择程序:"), 0, wx.ALL, 5)
+        sizer.Add(wx.StaticText(panel, label="双击选择程序添加:"), 0, wx.ALL, 5)
         
         listbox = wx.ListBox(panel, size=(-1, 300))
         for p in running:
@@ -304,17 +314,23 @@ def toggle_program(program):
             listbox.Append(display)
         sizer.Add(listbox, 1, wx.EXPAND|wx.ALL, 5)
         
-        def on_double(event):
+        selected = [None]
+        
+        def on_double_click(event):
             selection = listbox.GetSelection()
             if selection != wx.NOT_FOUND:
-                p = running[selection]
-                self.programs.append({'name': p['name'], 'path': p['path'], 'hotkey': ''})
+                # 双击直接添加
+                self.programs.append({
+                    'name': running[selection]['name'],
+                    'path': running[selection]['path'],
+                    'hotkey': ''
+                })
                 save_config(self.programs)
                 self.refresh_list()
-                self.start_hotkey_listener()
+                self.restart_hotkey_listener()
                 dialog.Destroy()
         
-        listbox.Bind(wx.EVT_LISTBOX_DCLICK, on_double)
+        listbox.Bind(wx.EVT_LISTBOX_DCLICK, on_double_click)
         
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         btn_sizer.Add(wx.Button(panel, wx.ID_CANCEL, "关闭"), 0, wx.ALL, 5)
@@ -322,6 +338,7 @@ def toggle_program(program):
         
         panel.SetSizer(sizer)
         dialog.ShowModal()
+        dialog.Destroy()
     
     def on_delete(self, event):
         selection = self.list_ctrl.GetFirstSelected()
@@ -329,7 +346,7 @@ def toggle_program(program):
             self.programs.pop(selection)
             save_config(self.programs)
             self.refresh_list()
-            self.start_hotkey_listener()
+            self.restart_hotkey_listener()
     
     def on_set_hotkey(self, event):
         selection = self.list_ctrl.GetFirstSelected()
@@ -337,11 +354,14 @@ def toggle_program(program):
             wx.MessageBox("请先选择程序", "提示")
             return
         
+        program = self.programs[selection]
+        current_hotkey = program.get('hotkey', '')
+        
         dlg = wx.TextEntryDialog(
             self, 
-            f"当前快捷键: {self.programs[selection].get('hotkey', '')}\n\n输入新快捷键 (如 alt+1, ctrl+a):",
+            f"当前快捷键: {current_hotkey}\n\n输入新快捷键 (如 alt+1, ctrl+a):",
             "设置快捷键",
-            self.programs[selection].get('hotkey', '')
+            current_hotkey
         )
         
         if dlg.ShowModal() == wx.ID_OK:
@@ -350,10 +370,82 @@ def toggle_program(program):
                 self.programs[selection]['hotkey'] = hotkey
                 save_config(self.programs)
                 self.refresh_list()
-                self.start_hotkey_listener()
                 wx.MessageBox(f"已设置快捷键: {hotkey}", "成功")
+                self.restart_hotkey_listener()
         
         dlg.Destroy()
+        dialog.Destroy()
+    
+    def start_hotkey_listener(self):
+        """启动热键监听线程"""
+        self.running = True
+        self.hotkey_thread = threading.Thread(target=self.hotkey_loop, daemon=True)
+        self.hotkey_thread.start()
+    
+    def restart_hotkey_listener(self):
+        """重启热键监听"""
+        self.running = False
+        time.sleep(0.3)
+        self.start_hotkey_listener()
+    
+    def hotkey_loop(self):
+        """热键检测循环"""
+        last_triggered = {}
+        cooldown = 500  # 500ms冷却
+        
+        while self.running:
+            now = time.time() * 1000
+            
+            # 每次循环都重新加载配置
+            programs = load_config()
+            if not programs:
+                time.sleep(0.1)
+                continue
+            
+            # 检测所有按键
+            for vk, key_name in [
+                (0x31, '1'), (0x32, '2'), (0x33, '3'), (0x34, '4'), (0x35, '5'),
+                (0x36, '6'), (0x37, '7'), (0x38, '8'), (0x39, '9'), (0x30, '0'),
+                (0x41, 'a'), (0x42, 'b'), (0x43, 'c'), (0x44, 'd'), (0x45, 'e'),
+                (0x46, 'f'), (0x47, 'g'), (0x48, 'h'), (0x49, 'i'), (0x4A, 'j'),
+                (0x4B, 'k'), (0x4C, 'l'), (0x4D, 'm'), (0x4E, 'n'), (0x4F, 'o'),
+                (0x50, 'p'), (0x51, 'q'), (0x52, 'r'), (0x53, 's'), (0x54, 't'),
+                (0x55, 'u'), (0x56, 'v'), (0x57, 'w'), (0x58, 'x'), (0x59, 'y'),
+                (0x5A, 'z'),
+                (0x70, 'f1'), (0x71, 'f2'), (0x72, 'f3'), (0x73, 'f4'),
+                (0x74, 'f5'), (0x75, 'f6'), (0x76, 'f7'), (0x77, 'f8'),
+                (0x78, 'f9'), (0x79, 'f10'), (0x7A, 'f11'), (0x7B, 'f12'),
+            ]:
+                if user32.GetAsyncKeyState(vk) & 0x8000:
+                    # 检测修饰键
+                    modifiers = []
+                    if user32.GetAsyncKeyState(0x11) & 0x8000:  # Ctrl
+                        modifiers.append('ctrl')
+                    if user32.GetAsyncKeyState(0x10) & 0x8000:  # Shift
+                        modifiers.append('shift')
+                    if user32.GetAsyncKeyState(0x12) & 0x8000:  # Alt
+                        modifiers.append('alt')
+                    
+                    if modifiers:
+                        expected = '+'.join(modifiers) + '+' + key_name
+                        
+                        print(f"Pressed: {expected}")
+                        
+                        # 检查冷却
+                        last_time = last_triggered.get(expected, 0)
+                        if now - last_time > cooldown:
+                            # 匹配并触发
+                            for program in programs:
+                                hotkey = program.get('hotkey', '').lower().replace(' ', '')
+                                print(f"Matching: {hotkey} == {expected} ? {hotkey == expected}")
+                                if hotkey == expected:
+                                    toggle_program(program)
+                                    last_triggered[expected] = now
+                                    wx.CallAfter(self.status_text.SetLabel, f"已切换: {program.get('name', '')}")
+                                    break
+                    break
+            
+            time.sleep(0.02)
 
 def get_process_title(pid):
     """获取进程的窗口标题"""
