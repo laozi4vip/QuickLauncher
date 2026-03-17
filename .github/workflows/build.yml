@@ -27,7 +27,11 @@ jobs:
     
     - name: Build EXE
       run: |
-        python -m nuitka --standalone --onefile --windows-disable-console --windows-icon-from-ico=icon.ico --output-dir=dist main/main.py
+        python -m nuitka --standalone --onefile --windows-disable-console --output-dir=dist main/main.py
+    
+    - name: List output
+      run: |
+        dir dist
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
