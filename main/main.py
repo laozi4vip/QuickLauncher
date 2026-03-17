@@ -17,9 +17,8 @@ import subprocess
 import psutil
 import ctypes
 import sys
-import multiprocessing
+import threading
 import time
-from pynput import keyboard
 
 # =========================
 # Windows API
@@ -300,26 +299,64 @@ class QuickLauncherFrame(wx.Frame):
             self.list_ctrl.Append([p.get('name', ''), p.get('hotkey', ''), p.get('path', '')])
     
     def start_hotkey_listener(self):
-        """启动热键监听进程"""
+        """启动热键监听线程"""
         # 停止旧的
-        if self.hotkey_process and self.hotkey_process.is_alive():
-            self.hotkey_process.terminate()
+        if self.hotkey_thread and self.hotkey_thread.is_alive():
+            self.running = False
+            time.sleep(0.2)
         
-        # 创建热键字典
-        hotkeys = {}
+        self.running = True
+        
+        # 创建热键字典（只保存路径和名称）
+        self.hotkey_programs = {}
         for p in self.programs:
             hotkey = p.get('hotkey', '')
             if hotkey:
-                hotkeys[hotkey] = p
+                self.hotkey_programs[hotkey] = {
+                    'path': p.get('path', ''),
+                    'name': p.get('name', '')
+                }
         
-        if hotkeys:
-            # 使用简单的轮询方式（pynput 在某些环境下有问题）
-            self.hotkey_process = multiprocessing.Process(
-                target=simple_hotkey_listener, 
-                args=(hotkeys,),
-                daemon=True
-            )
-            self.hotkey_process.start()
+        if self.hotkey_programs:
+            self.hotkey_thread = threading.Thread(target=self.hotkey_loop, daemon=True)
+            self.hotkey_thread.start()
+    
+    def hotkey_loop(self):
+        """热键检测循环"""
+        last_triggered = {}
+        cooldown = 500
+        
+        vk_map = {
+            '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34, '5': 0x35,
+            '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39, '0': 0x30,
+        }
+        
+        while self.running:
+            now = time.time() * 1000
+            
+            for vk, key_name in vk_map.items():
+                if user32.GetAsyncKeyState(vk) & 0x8000:
+                    modifiers = []
+                    if user32.GetAsyncKeyState(0x11) & 0x8000:
+                        modifiers.append('ctrl')
+                    if user32.GetAsyncKeyState(0x10) & 0x8000:
+                        modifiers.append('shift')
+                    if user32.GetAsyncKeyState(0x12) & 0x8000:
+                        modifiers.append('alt')
+                    
+                    if modifiers:
+                        expected = '+'.join(modifiers) + '+' + key_name
+                        
+                        last_time = last_triggered.get(expected, 0)
+                        if now - last_time > cooldown:
+                            program = self.hotkey_programs.get(expected)
+                            if program:
+                                toggle_program(program)
+                                last_triggered[expected] = now
+                                wx.CallAfter(self.status_text.SetLabel, f"已切换: {program.get('name', '')}")
+                    break
+            
+            time.sleep(0.02)
     
     def on_manual_add(self, event):
         """手动添加程序"""
@@ -486,45 +523,6 @@ def get_process_title(pid):
     except:
         pass
     return ""
-
-def simple_hotkey_listener(hotkeys):
-    """简单的热键监听 - 使用轮询"""
-    last_triggered = {}
-    cooldown = 500
-    
-    # 虚拟键码映射
-    vk_map = {
-        '1': 0x31, '2': 0x32, '3': 0x33, '4': 0x34, '5': 0x35,
-        '6': 0x36, '7': 0x37, '8': 0x38, '9': 0x39, '0': 0x30,
-    }
-    
-    while True:
-        now = time.time() * 1000
-        
-        for vk, key_name in vk_map.items():
-            if user32.GetAsyncKeyState(vk) & 0x8000:
-                modifiers = []
-                if user32.GetAsyncKeyState(0x11) & 0x8000:  # Ctrl
-                    modifiers.append('ctrl')
-                if user32.GetAsyncKeyState(0x10) & 0x8000:  # Shift
-                    modifiers.append('shift')
-                if user32.GetAsyncKeyState(0x12) & 0x8000:  # Alt
-                    modifiers.append('alt')
-                
-                if modifiers:
-                    expected = '+'.join(modifiers) + '+' + key_name
-                    
-                    last_time = last_triggered.get(expected, 0)
-                    if now - last_time > cooldown:
-                        for program in hotkeys.values():
-                            hotkey = program.get('hotkey', '').lower().replace(' ', '')
-                            if hotkey == expected:
-                                toggle_program(program)
-                                last_triggered[expected] = now
-                                break
-                break
-        
-        time.sleep(0.02)
 
 class QuickLauncherApp(wx.App):
     def OnInit(self):
