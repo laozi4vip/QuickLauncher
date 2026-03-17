@@ -23,22 +23,22 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install -r requirements.txt
+        pip install pyinstaller pywin32 psutil wxpython
     
     - name: Build EXE
       run: |
-        python -m nuitka --standalone --onefile --mingw64 --assume-yes-for-downloads --windows-disable-console --output-dir=out main/main.py
+        pyinstaller --onefile --windowed --collect-all wx --collect-all psutil --name QuickLauncher main/main.py
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: QuickLauncher
-        path: out/main.exe
+        path: dist/QuickLauncher.exe
     
     - name: Create Release
       uses: softprops/action-gh-release@v2
       if: startsWith(github.ref, 'refs/tags/v')
       with:
-        files: out/main.exe
+        files: dist/QuickLauncher.exe
         draft: false
         prerelease: false
