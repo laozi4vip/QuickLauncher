@@ -27,6 +27,10 @@ jobs:
         pyinstaller --onefile --windowed --name QuickLauncher main/main.py
         if (Test-Path "dist\QuickLauncher.exe") {
             Copy-Item "dist\QuickLauncher.exe" .
+            Write-Host "Build successful"
+        } else {
+            Write-Host "Build failed"
+            exit 1
         }
     
     - name: Upload artifact
