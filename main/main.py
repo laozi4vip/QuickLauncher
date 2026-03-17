@@ -50,63 +50,36 @@ def save_config(programs):
 def find_window(exe_name):
     """根据exe名称查找窗口"""
     exe_name = exe_name.lower().replace('.exe', '')
-    windows = []
+    candidate_hwnds = []
     
-    def callback(hwnd, wins):
+    def callback(hwnd, param):
         try:
-            if hwnd and user32.IsWindow(hwnd):
-                # 获取窗口标题
-                length = user32.GetWindowTextLengthW(hwnd)
-                if length > 0:
-                    wins.append(hwnd)
+            if user32.IsWindowVisible(hwnd) and user32.IsWindowEnabled(hwnd):
+                pid = ctypes.c_ulong()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                try:
+                    proc = psutil.Process(pid.value)
+                    proc_name = proc.name().lower().replace('.exe', '')
+                    if exe_name == proc_name:
+                        candidate_hwnds.append(hwnd)
+                except:
+                    pass
         except:
             pass
         return True
     
-    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
-    try:
-        user32.EnumWindows(WNDENUMPROC(callback), windows)
-    except:
-        pass
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    user32.EnumWindows(WNDENUMPROC(callback), 0)
     
-    # 查找匹配的窗口
-    for hwnd in windows:
-        pid = ctypes.c_ulong()
-        try:
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            proc = psutil.Process(pid.value)
-            proc_name = proc.name().lower().replace('.exe', '')
-            if exe_name in proc_name or proc_name in exe_name:
-                return hwnd
-        except:
-            pass
+    # 优先返回前台窗口
+    fg_hwnd = user32.GetForegroundWindow()
+    if fg_hwnd in candidate_hwnds:
+        return fg_hwnd
     
-    return None
-
-def is_minimized(hwnd):
-    try:
-        return user32.IsIconic(hwnd)
-    except:
-        return False
-
-def restore_window(hwnd):
-    try:
-        # 如果窗口最小化，先恢复
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, SW_RESTORE)
-        
-        # 激活窗口到前台
-        user32.SetForegroundWindow(hwnd)
-        
-        # 置顶窗口
-        user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002)
-        
-        # 强制激活
-        user32.SetActiveWindow(hwnd)
-    except:
-        pass
-
-def minimize_window(hwnd):
+    if candidate_hwnds:
+        return candidate_hwnds[0]
+    
+    return Nonedef minimize_window(hwnd):
     try:
         user32.ShowWindow(hwnd, SW_MINIMIZE)
     except:
@@ -119,21 +92,21 @@ def toggle_program(program):
         return
     
     exe_name = os.path.basename(path).lower().replace('.exe', '')
-    
     hwnd = find_window(exe_name)
     
     if hwnd:
-        # 窗口存在，检查是否最小化
-        if user32.IsIconic(hwnd):
-            # 最小化状态 -> 恢复并激活
-            user32.ShowWindow(hwnd, SW_RESTORE)
-            user32.SetForegroundWindow(hwnd)
-            user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002)
-        else:
-            # 非最小化 -> 最小化
+        # 检查窗口是否在前端
+        fg_hwnd = user32.GetForegroundWindow()
+        if hwnd == fg_hwnd:
+            # 窗口已经在前端，最小化
             user32.ShowWindow(hwnd, SW_MINIMIZE)
+        else:
+            # 窗口不在前端，恢复并激活
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(hwnd)
     else:
-        # 窗口不存在 -> 启动程序
+        # 窗口不存在，启动程序
         if os.path.exists(path):
             subprocess.Popen(path)
 
