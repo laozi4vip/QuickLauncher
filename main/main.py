@@ -49,7 +49,7 @@ def save_config(programs):
 
 def find_window(exe_name):
     """根据exe名称查找窗口（包括最小化的窗口）"""
-    exe_name = exe_name.lower()
+    exe_name = exe_name.lower().replace('.exe', '')
     windows = []
     
     def callback(hwnd, wins):
@@ -68,14 +68,16 @@ def find_window(exe_name):
     except:
         pass
     
-    # 优先查找可见窗口
+    # 优先查找可见窗口（Z序顶部）
     for hwnd in windows:
         if user32.IsWindowVisible(hwnd):
             pid = ctypes.c_ulong()
             try:
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                 proc = psutil.Process(pid.value)
-                if exe_name in proc.name().lower():
+                proc_name = proc.name().lower().replace('.exe', '')
+                # 更灵活的匹配
+                if exe_name in proc_name or proc_name in exe_name:
                     return hwnd
             except:
                 pass
@@ -87,7 +89,8 @@ def find_window(exe_name):
             try:
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                 proc = psutil.Process(pid.value)
-                if exe_name in proc.name().lower():
+                proc_name = proc.name().lower().replace('.exe', '')
+                if exe_name in proc_name or proc_name in exe_name:
                     return hwnd
             except:
                 pass
@@ -102,11 +105,18 @@ def is_minimized(hwnd):
 
 def restore_window(hwnd):
     try:
-        if is_minimized(hwnd):
+        # 如果窗口最小化，先恢复
+        if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, SW_RESTORE)
+        
+        # 激活窗口到前台
         user32.SetForegroundWindow(hwnd)
-        # 置顶
+        
+        # 置顶窗口
         user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002)
+        
+        # 强制激活
+        user32.SetActiveWindow(hwnd)
     except:
         pass
 
