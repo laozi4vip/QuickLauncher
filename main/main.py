@@ -29,25 +29,21 @@ else:
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
-class Config:
-    programs = []
-    
-    @staticmethod
-    def load():
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    Config.programs = data.get('programs', [])
-            except:
-                Config.programs = []
-        else:
-            Config.programs = []
-    
-    @staticmethod
-    def save():
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump({'programs': Config.programs}, f, ensure_ascii=False, indent=4)
+def load_config():
+    """加载配置"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('programs', [])
+        except:
+            pass
+    return []
+
+def save_config(programs):
+    """保存配置"""
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump({'programs': programs}, f, ensure_ascii=False, indent=4)
 
 def find_window(exe_name):
     """根据exe名称查找窗口（包括最小化的窗口）"""
@@ -145,7 +141,8 @@ class QuickLauncherFrame(wx.Frame):
     def __init__(self):
         super().__init__(None, title="QuickLauncher - 快捷启动器", size=(600, 450))
         
-        Config.load()
+        # 使用实例变量
+        self.programs = load_config()
         
         self.init_ui()
         self.Centre()
@@ -203,7 +200,7 @@ class QuickLauncherFrame(wx.Frame):
     
     def refresh_list(self):
         self.list_ctrl.DeleteAllItems()
-        for i, p in enumerate(Config.programs):
+        for i, p in enumerate(self.programs):
             self.list_ctrl.Append([p.get('name', ''), p.get('hotkey', ''), p.get('path', '')])
     
     def on_add_from_running(self, event):
@@ -260,12 +257,12 @@ class QuickLauncherFrame(wx.Frame):
         
         def ok():
             if selected[0]:
-                Config.programs.append({
+                self.programs.append({
                     'name': selected[0]['name'],
                     'path': selected[0]['path'],
                     'hotkey': ''
                 })
-                Config.save()
+                save_config(self.programs)
                 self.refresh_list()
                 self.list_ctrl.Refresh()
                 self.restart_hotkey_listener()
@@ -283,8 +280,8 @@ class QuickLauncherFrame(wx.Frame):
     def on_delete(self, event):
         selection = self.list_ctrl.GetFirstSelected()
         if selection >= 0:
-            Config.programs.pop(selection)
-            Config.save()
+            self.programs.pop(selection)
+            save_config(self.programs)
             self.refresh_list()
             self.restart_hotkey_listener()
     
@@ -327,9 +324,9 @@ class QuickLauncherFrame(wx.Frame):
         
         def ok():
             hotkey = hotkey_ctrl.GetValue().strip()
-            if hotkey and selection < len(Config.programs):
-                Config.programs[selection]['hotkey'] = hotkey
-                Config.save()
+            if hotkey and selection < len(self.programs):
+                self.programs[selection]['hotkey'] = hotkey
+                save_config(self.programs)
                 self.refresh_list()
                 self.restart_hotkey_listener()
             dialog.Destroy()
@@ -363,6 +360,13 @@ class QuickLauncherFrame(wx.Frame):
         while self.running:
             now = time.time() * 1000
             
+            # 每次循环都重新加载配置
+            programs = load_config()
+            
+            if not programs:
+                time.sleep(0.1)
+                continue
+            
             # 检测修饰键
             alt = user32.GetAsyncKeyState(0x12) & 0x8000
             ctrl = user32.GetAsyncKeyState(0x11) & 0x8000
@@ -387,7 +391,7 @@ class QuickLauncherFrame(wx.Frame):
                         last_time = last_triggered.get(expected, 0)
                         if now - last_time > cooldown:
                             # 匹配并触发
-                            for program in Config.programs:
+                            for program in programs:
                                 hotkey = program.get('hotkey', '').lower().replace(' ', '')
                                 if hotkey == expected:
                                     toggle_program(program)
