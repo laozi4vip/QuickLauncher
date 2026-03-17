@@ -48,13 +48,14 @@ def save_config(programs):
     print(f"Programs: {programs}")
 
 def find_window(exe_name):
-    """根据exe名称查找窗口（包括最小化的窗口）"""
+    """根据exe名称查找窗口"""
     exe_name = exe_name.lower().replace('.exe', '')
     windows = []
     
     def callback(hwnd, wins):
         try:
             if hwnd and user32.IsWindow(hwnd):
+                # 获取窗口标题
                 length = user32.GetWindowTextLengthW(hwnd)
                 if length > 0:
                     wins.append(hwnd)
@@ -68,32 +69,17 @@ def find_window(exe_name):
     except:
         pass
     
-    # 优先查找可见窗口（Z序顶部）
+    # 查找匹配的窗口
     for hwnd in windows:
-        if user32.IsWindowVisible(hwnd):
-            pid = ctypes.c_ulong()
-            try:
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                proc = psutil.Process(pid.value)
-                proc_name = proc.name().lower().replace('.exe', '')
-                # 更灵活的匹配
-                if exe_name in proc_name or proc_name in exe_name:
-                    return hwnd
-            except:
-                pass
-    
-    # 查找最小化的窗口
-    for hwnd in windows:
-        if user32.IsIconic(hwnd):
-            pid = ctypes.c_ulong()
-            try:
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                proc = psutil.Process(pid.value)
-                proc_name = proc.name().lower().replace('.exe', '')
-                if exe_name in proc_name or proc_name in exe_name:
-                    return hwnd
-            except:
-                pass
+        pid = ctypes.c_ulong()
+        try:
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            proc = psutil.Process(pid.value)
+            proc_name = proc.name().lower().replace('.exe', '')
+            if exe_name in proc_name or proc_name in exe_name:
+                return hwnd
+        except:
+            pass
     
     return None
 
@@ -130,29 +116,26 @@ def toggle_program(program):
     """切换程序窗口状态"""
     path = program.get('path', '')
     if not path:
-        return False
+        return
     
     exe_name = os.path.basename(path).lower().replace('.exe', '')
-    print(f"Toggle: {exe_name}, path: {path}")
     
     hwnd = find_window(exe_name)
-    print(f"Found hwnd: {hwnd}")
     
     if hwnd:
-        if is_minimized(hwnd):
-            print("Restoring window")
-            restore_window(hwnd)
+        # 窗口存在，检查是否最小化
+        if user32.IsIconic(hwnd):
+            # 最小化状态 -> 恢复并激活
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002)
         else:
-            print("Minimizing window")
-            minimize_window(hwnd)
-        return True
+            # 非最小化 -> 最小化
+            user32.ShowWindow(hwnd, SW_MINIMIZE)
     else:
-        # 启动程序
-        print("Launching program")
+        # 窗口不存在 -> 启动程序
         if os.path.exists(path):
             subprocess.Popen(path)
-            return True
-    return False
 
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
