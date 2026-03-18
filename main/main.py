@@ -9,7 +9,6 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 
 __author__ = "xinghui"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
-__version__ = "1.0.38"
 __app_name__ = "QuickLauncher"
 __description__ = "Windows 任务栏快捷启动器"
 
