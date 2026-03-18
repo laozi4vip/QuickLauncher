@@ -1,6 +1,6 @@
 # QuickLauncher
 
-Windows 任务栏快捷启动器
+Windows 任务栏程序快捷启动器
 
 ## 作者
 
