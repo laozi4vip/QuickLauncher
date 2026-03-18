@@ -9,7 +9,9 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 
 __author__ = "xinghui"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
-__version__ = "1.0.36"
+__version__ = "1.0.38"
+__app_name__ = "QuickLauncher"
+__description__ = "Windows 任务栏快捷启动器"
 
 import wx
 import wx.adv
@@ -684,19 +686,32 @@ class HotkeyCaptureDialog(wx.Dialog):
             wx.Bell()
 
 
+def get_icon_path():
+    """获取图标路径，优先从exe同目录查找"""
+    # 打包后从exe所在目录查找
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = BASE_DIR
+    icon_path = os.path.join(base, "icon.ico")
+    if os.path.exists(icon_path):
+        return icon_path
+    # 备选：从当前目录查找
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+
 class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
     def __init__(self, frame):
         super().__init__()
         self.frame = frame
         # 加载图标文件
-        icon_path = os.path.join(BASE_DIR, "icon.ico")
+        icon_path = get_icon_path()
         if os.path.exists(icon_path):
             icon = wx.Icon(icon_path, wx.BITMAP_TYPE_ICO)
         else:
             bmp = wx.ArtProvider.GetBitmap(wx.ART_EXECUTABLE_FILE, wx.ART_OTHER, (16, 16))
             icon = wx.Icon()
             icon.CopyFromBitmap(bmp)
-        self.SetIcon(icon, f"QuickLauncher v{__version__}")
+        self.SetIcon(icon, f"{__app_name__} v{__version__}")
         self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, lambda e: self.frame.show_from_tray())
 
     def CreatePopupMenu(self):
@@ -719,10 +734,10 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
 # ---------------------------
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title=f"QuickLauncher v{__version__}", size=(980, 580))
+        super().__init__(None, title=f"{__app_name__} v{__version__}", size=(980, 580))
         
         # 设置窗口图标
-        icon_path = os.path.join(BASE_DIR, "icon.ico")
+        icon_path = get_icon_path()
         if os.path.exists(icon_path):
             self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_ICO))
         
@@ -755,7 +770,9 @@ class QuickLauncherFrame(wx.Frame):
         
         # 帮助菜单
         help_menu = wx.Menu()
-        about_item = help_menu.Append(wx.ID_ABOUT, "关于 QuickLauncher", "关于本软件")
+        check_update_item = help_menu.Append(wx.ID_ANY, "检查更新", "检查是否有新版本")
+        self.Bind(wx.EVT_MENU, lambda e: self.check_for_updates(), check_update_item)
+        about_item = help_menu.Append(wx.ID_ABOUT, f"关于 {__app_name__}", "关于本软件")
         self.Bind(wx.EVT_MENU, self.on_about, about_item)
         help_menu.AppendSeparator()
         exit_item = help_menu.Append(wx.ID_EXIT, "退出", "退出程序")
@@ -849,12 +866,56 @@ class QuickLauncherFrame(wx.Frame):
     def on_about(self, _):
         """显示关于对话框"""
         info = wx.adv.AboutDialogInfo()
-        info.SetName("QuickLauncher")
+        info.SetName(__app_name__)
         info.SetVersion(__version__)
-        info.SetDescription("Windows 任务栏快捷启动器\n\n绑定快捷键快速启动或切换程序窗口")
-        info.SetWebSite("https://github.com/laozi4vip/QuickLauncher")
+        info.SetDescription(f"{__description__}\n\n作者：{__author__}\nGitHub：{__github__}")
+        info.SetWebSite(__github__)
         info.AddDeveloper(__author__)
         wx.adv.AboutBox(info)
+
+    def check_for_updates(self):
+        """检查更新"""
+        import urllib.request
+        import json
+        try:
+            url = f"https://api.github.com/repos/laozi4vip/QuickLauncher/releases/latest"
+            req = urllib.request.Request(url, headers={'User-Agent': 'QuickLauncher'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode())
+                latest_version = data.get('tag_name', 'v1.0.0').lstrip('v')
+                current_version = __version__
+                
+                # 比较版本
+                def parse_version(v):
+                    parts = v.split('.')
+                    return [int(p) for p in parts] + [0] * (3 - len(parts))
+                
+                latest = parse_version(latest_version)
+                current = parse_version(current_version)
+                
+                if latest > current:
+                    dlg = wx.Dialog(self, title="检查更新", size=(400, 180))
+                    panel = wx.Panel(dlg)
+                    sizer = wx.BoxSizer(wx.VERTICAL)
+                    sizer.Add(wx.StaticText(panel, label=f"当前版本：v{current_version}"), 0, wx.ALL, 10)
+                    sizer.Add(wx.StaticText(panel, label=f"最新版本：v{latest_version}"), 0, wx.ALL, 10)
+                    sizer.Add(wx.StaticText(panel, label="发现新版本！"), 0, wx.ALL, 10)
+                    
+                    btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+                    ok_btn = wx.Button(panel, label="前往下载")
+                    ok_btn.Bind(lambda e: wx.LaunchBrowserInDefaultBrowser(__github__ + "/releases"))
+                    btn_sizer.Add(ok_btn, 0, wx.ALL, 5)
+                    cancel_btn = wx.Button(panel, wx.ID_CANCEL, "关闭")
+                    btn_sizer.Add(cancel_btn, 0, wx.ALL, 5)
+                    sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER|wx.ALL, 10)
+                    
+                    panel.SetSizer(sizer)
+                    dlg.ShowModal()
+                    dlg.Destroy()
+                else:
+                    wx.MessageBox(f"当前已是最新版本 (v{current_version})", "检查更新", wx.OK | wx.ICON_INFORMATION)
+        except Exception as e:
+            wx.MessageBox(f"检查更新失败：{str(e)}", "错误", wx.OK | wx.ICON_ERROR)
 
     def exit_app(self):
         self.exiting = True

@@ -1,0 +1,30 @@
+name: Update Version
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Update version in code
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          sed -i "s/__version__ = \"[^\"]*\"/__version__ = \"$VERSION\"/" main/main.py
+          cat main/main.py | grep "__version__"
+
+      - name: Commit and push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add main/main.py
+          git commit -m "更新版本号 ${{ steps.version.outputs.VERSION }}" || echo "No changes to commit"
+          git push
