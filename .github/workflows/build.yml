@@ -39,6 +39,7 @@ jobs:
           python -m PyInstaller --noconfirm --clean --onefile --windowed `
             --collect-all wx `
             --collect-all psutil `
+            --add-binary "main/icon.ico:." `
             --name QuickLauncher `
             main/main.py
 

@@ -688,10 +688,15 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
     def __init__(self, frame):
         super().__init__()
         self.frame = frame
-        bmp = wx.ArtProvider.GetBitmap(wx.ART_EXECUTABLE_FILE, wx.ART_OTHER, (16, 16))
-        icon = wx.Icon()
-        icon.CopyFromBitmap(bmp)
-        self.SetIcon(icon, "QuickLauncher")
+        # 加载图标文件
+        icon_path = os.path.join(BASE_DIR, "icon.ico")
+        if os.path.exists(icon_path):
+            icon = wx.Icon(icon_path, wx.BITMAP_TYPE_ICO)
+        else:
+            bmp = wx.ArtProvider.GetBitmap(wx.ART_EXECUTABLE_FILE, wx.ART_OTHER, (16, 16))
+            icon = wx.Icon()
+            icon.CopyFromBitmap(bmp)
+        self.SetIcon(icon, f"QuickLauncher v{__version__}")
         self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, lambda e: self.frame.show_from_tray())
 
     def CreatePopupMenu(self):
@@ -699,9 +704,12 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
         s = menu.Append(wx.ID_ANY, "显示主窗口")
         h = menu.Append(wx.ID_ANY, "隐藏到托盘")
         menu.AppendSeparator()
+        about = menu.Append(wx.ID_ABOUT, f"关于 QuickLauncher v{__version__}")
+        menu.AppendSeparator()
         x = menu.Append(wx.ID_EXIT, "退出")
         self.Bind(wx.EVT_MENU, lambda e: self.frame.show_from_tray(), s)
         self.Bind(wx.EVT_MENU, lambda e: self.frame.hide_to_tray(), h)
+        self.Bind(wx.EVT_MENU, lambda e: self.frame.on_about(None), about)
         self.Bind(wx.EVT_MENU, lambda e: self.frame.exit_app(), x)
         return menu
 
@@ -711,7 +719,13 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
 # ---------------------------
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="QuickLauncher", size=(980, 580))
+        super().__init__(None, title=f"QuickLauncher v{__version__}", size=(980, 580))
+        
+        # 设置窗口图标
+        icon_path = os.path.join(BASE_DIR, "icon.ico")
+        if os.path.exists(icon_path):
+            self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_ICO))
+        
         cfg = load_config()
         self.programs = cfg["programs"]
         self.autostart = cfg["autostart"]
@@ -736,6 +750,20 @@ class QuickLauncherFrame(wx.Frame):
         update_last_active_cache()
 
     def init_ui(self):
+        # 创建菜单栏
+        menubar = wx.MenuBar()
+        
+        # 帮助菜单
+        help_menu = wx.Menu()
+        about_item = help_menu.Append(wx.ID_ABOUT, "关于 QuickLauncher", "关于本软件")
+        self.Bind(wx.EVT_MENU, self.on_about, about_item)
+        help_menu.AppendSeparator()
+        exit_item = help_menu.Append(wx.ID_EXIT, "退出", "退出程序")
+        self.Bind(wx.EVT_MENU, self.exit_app, exit_item)
+        
+        menubar.Append(help_menu, "帮助")
+        self.SetMenuBar(menubar)
+        
         panel = wx.Panel(self)
         root = wx.BoxSizer(wx.VERTICAL)
 
@@ -817,6 +845,16 @@ class QuickLauncherFrame(wx.Frame):
         else:
             event.Veto()
             self.hide_to_tray()
+
+    def on_about(self, _):
+        """显示关于对话框"""
+        info = wx.adv.AboutDialogInfo()
+        info.SetName("QuickLauncher")
+        info.SetVersion(__version__)
+        info.SetDescription("Windows 任务栏快捷启动器\n\n绑定快捷键快速启动或切换程序窗口")
+        info.SetWebSite("https://github.com/laozi4vip/QuickLauncher")
+        info.AddDeveloper(__author__)
+        wx.adv.AboutBox(info)
 
     def exit_app(self):
         self.exiting = True
