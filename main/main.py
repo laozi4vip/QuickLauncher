@@ -771,7 +771,7 @@ class QuickLauncherFrame(wx.Frame):
         # 帮助菜单
         help_menu = wx.Menu()
         check_update_item = help_menu.Append(wx.ID_ANY, "检查更新", "检查是否有新版本")
-        self.Bind(wx.EVT_MENU, lambda e: self.check_for_updates(), check_update_item)
+        self.Bind(wx.EVT_MENU, self.check_for_updates, check_update_item)
         about_item = help_menu.Append(wx.ID_ABOUT, f"关于 {__app_name__}", "关于本软件")
         self.Bind(wx.EVT_MENU, self.on_about, about_item)
         help_menu.AppendSeparator()
