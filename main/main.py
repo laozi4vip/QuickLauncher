@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-QuickLauncher - 浏览器多用户稳定控制版
-★ 修复：Chrome 重启后 Profile 通过进程树回溯正确重绑
-★ 修改：浏览器类程序在所有模式都没匹配上时，按快捷键无任何响应（不兜底启动）
-★ 保留：非浏览器程序仍按程序名称启动
+QuickLauncher - Windows任务栏快捷启动器
+作者：xinghui
+GitHub：https://github.com/laozi4vip/QuickLauncher
+功能：绑定任务栏程序到快捷键，按快捷键启动或切换窗口
+版本：1.0.36
 """
+
+__author__ = "xinghui"
+__github__ = "https://github.com/laozi4vip/QuickLauncher"
+__version__ = "1.0.36"
 
 import wx
 import wx.adv
