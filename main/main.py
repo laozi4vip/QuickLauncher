@@ -3,8 +3,6 @@
 QuickLauncher - Windows任务栏快捷启动器
 作者：laozi4vip
 GitHub：https://github.com/laozi4vip/QuickLauncher
-功能：绑定任务栏程序到快捷键，按快捷键启动或切换窗口
-版本：1.0.36
 """
 
 __author__ = "laozi4vip"
