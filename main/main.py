@@ -190,7 +190,7 @@ def parse_hotkey(hotkey_str: str):
 
 def canonical_hotkey(hotkey_str: str):
     """
-    规范化显示顺序：ctrl+shift+alt+win+key
+   # 规范化显示顺序：ctrl+shift+alt+win+key
     """
     p = parse_hotkey(hotkey_str)
     if not p:
