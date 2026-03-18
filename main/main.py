@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 QuickLauncher - Windows任务栏快捷启动器（增强稳定版）
-新增：
-1) 设置快捷键时，直接按键自动录入（无需手动输入）
-2) 支持“同一浏览器多窗口”分别绑定不同快捷键（通过“窗口关键词”区分）
-   - 例如：
-     Chrome-工作:  hotkey=ctrl+alt+1, path=chrome.exe, window_keyword=工作
-     Chrome-娱乐:  hotkey=ctrl+alt+2, path=chrome.exe, window_keyword=娱乐
-   - 配置写入 config.json，重启后仍生效
+新增/修复：
+1) 设置快捷键时，直接按键自动录入
+2) 支持同一程序多窗口绑定不同快捷键（window_keyword 区分）
+3) 修复“从运行程序添加”仅显示一个Chrome窗口的问题（改为按窗口枚举）
+4) 修复 Firefox 等程序可能不显示的问题（窗口枚举 + 进程反查）
+5) 手动添加支持“搜索程序”并自动填充路径
 """
 
 import wx
@@ -32,6 +31,9 @@ MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 
+GWL_EXSTYLE = -20
+WS_EX_TOOLWINDOW = 0x00000080
+
 RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_RUN_NAME = "QuickLauncher"
 
@@ -50,7 +52,6 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 # 配置 / 自启
 # ---------------------------
 def get_launch_command():
-    """获取开机自启命令"""
     if getattr(sys, 'frozen', False):
         return f'"{sys.executable}"'
     return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
@@ -90,7 +91,6 @@ def load_config():
             programs = data.get("programs", [])
             autostart = data.get("autostart", is_autostart_enabled())
 
-            # 兼容旧配置字段
             for p in programs:
                 p.setdefault("name", "")
                 p.setdefault("path", "")
@@ -119,11 +119,6 @@ def normalize_hotkey(hotkey: str) -> str:
 
 
 def hotkey_to_mod_vk(hotkey: str):
-    """
-    解析快捷键到 (modifiers, vk, normalized_hotkey)
-    - 单键仅支持 F1-F12
-    - 组合键支持 ctrl/alt/shift/win + (a-z,0-9,f1-f12)
-    """
     hotkey = normalize_hotkey(hotkey)
     if not hotkey:
         raise ValueError("快捷键不能为空")
@@ -177,20 +172,13 @@ def hotkey_to_mod_vk(hotkey: str):
 
 
 def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
-    """
-    把键盘事件转为标准热键字符串。
-    返回 "" 表示当前按键不支持作为主键。
-    """
     key = event.GetKeyCode()
     main_key = None
 
-    # F1-F12
     if wx.WXK_F1 <= key <= wx.WXK_F12:
         main_key = f"f{key - wx.WXK_F1 + 1}"
-    # 0-9
     elif ord('0') <= key <= ord('9'):
         main_key = chr(key).lower()
-    # A-Z / a-z
     elif ord('A') <= key <= ord('Z'):
         main_key = chr(key).lower()
     elif ord('a') <= key <= ord('z'):
@@ -205,12 +193,11 @@ def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
         mods.append("shift")
     if event.AltDown():
         mods.append("alt")
-    # Win键
     if event.MetaDown():
         mods.append("win")
 
     if not mods and not main_key.startswith("f"):
-        return ""  # 单键仅允许 F1-F12
+        return ""
 
     return "+".join(mods + [main_key]) if mods else main_key
 
@@ -227,8 +214,65 @@ def get_window_title(hwnd):
     return buf.value or ""
 
 
+def get_pid_from_hwnd(hwnd):
+    pid = ctypes.c_ulong()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def is_alt_tab_window(hwnd):
+    """过滤掉工具窗口等，不在 Alt-Tab 的窗口"""
+    if not user32.IsWindowVisible(hwnd):
+        return False
+    if user32.IsIconic(hwnd):  # 最小化也允许显示在列表中，这里不排除
+        pass
+    title = get_window_title(hwnd)
+    if not title.strip():
+        return False
+
+    exstyle = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    if exstyle & WS_EX_TOOLWINDOW:
+        return False
+    return True
+
+
+def enum_visible_app_windows():
+    """返回窗口列表: [{'hwnd','pid','title'}...]，按窗口而非进程"""
+    windows = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def callback(hwnd, _):
+        try:
+            if not user32.IsWindow(hwnd):
+                return True
+            if not is_alt_tab_window(hwnd):
+                return True
+            pid = get_pid_from_hwnd(hwnd)
+            title = get_window_title(hwnd)
+            windows.append({
+                "hwnd": int(hwnd),
+                "pid": int(pid),
+                "title": title.strip()
+            })
+        except Exception:
+            pass
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return windows
+
+
+def get_proc_path_and_name(pid):
+    try:
+        p = psutil.Process(pid)
+        path = p.exe() or ""
+        name = p.name() or ""
+        return path, name
+    except Exception:
+        return "", ""
+
+
 def enum_windows_for_exe(exe_name):
-    """返回 [(hwnd, title)]，匹配 exe_name"""
     exe_name = exe_name.lower().replace(".exe", "")
     result = []
 
@@ -242,7 +286,7 @@ def enum_windows_for_exe(exe_name):
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             try:
                 proc = psutil.Process(pid.value)
-                proc_name = proc.name().lower().replace(".exe", "")
+                proc_name = (proc.name() or "").lower().replace(".exe", "")
                 if proc_name == exe_name:
                     title = get_window_title(hwnd)
                     result.append((hwnd, title))
@@ -257,11 +301,6 @@ def enum_windows_for_exe(exe_name):
 
 
 def find_window_for_program(program):
-    """
-    支持窗口关键词匹配：
-    - path -> exe_name
-    - window_keyword 非空时，仅匹配标题包含关键词的窗口
-    """
     path = program.get("path", "")
     if not path:
         return None
@@ -281,7 +320,6 @@ def find_window_for_program(program):
         if hwnd == fg:
             return hwnd
 
-    # 优先非最小化
     for hwnd, _ in candidates:
         if not user32.IsIconic(hwnd):
             return hwnd
@@ -309,32 +347,180 @@ def toggle_program(program):
         if not os.path.exists(path):
             wx.MessageBox(f"程序不存在：\n{path}", "错误", wx.OK | wx.ICON_ERROR)
             return
+
         cmd = [path]
         if args.strip():
-            # 简易参数拆分（保持常用场景稳定）
-            cmd.extend(args.strip().split())
+            # 为了支持带引号参数，这里用 shell-like 拆分
+            import shlex
+            try:
+                cmd.extend(shlex.split(args.strip(), posix=False))
+            except Exception:
+                cmd.extend(args.strip().split())
+
         subprocess.Popen(cmd)
 
 
-def get_process_title(pid):
-    windows = []
+# ---------------------------
+# 程序搜索
+# ---------------------------
+def collect_search_dirs():
+    dirs = []
+    for env_key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]:
+        v = os.environ.get(env_key, "")
+        if v and os.path.isdir(v):
+            dirs.append(v)
 
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-    def callback(hwnd, _):
+    # LOCALAPPDATA\Programs
+    lap = os.environ.get("LOCALAPPDATA", "")
+    if lap:
+        p = os.path.join(lap, "Programs")
+        if os.path.isdir(p):
+            dirs.append(p)
+
+    # PATH 目录也扫一下
+    for p in os.environ.get("PATH", "").split(";"):
+        p = p.strip().strip('"')
+        if p and os.path.isdir(p):
+            dirs.append(p)
+
+    # 去重保持顺序
+    seen = set()
+    result = []
+    for d in dirs:
+        ld = d.lower()
+        if ld not in seen:
+            seen.add(ld)
+            result.append(d)
+    return result
+
+
+def search_executables(query: str, max_results=300):
+    """
+    在常见目录中搜索 exe。
+    - query 支持名称包含匹配（不含路径）
+    """
+    query = (query or "").strip().lower()
+    if not query:
+        return []
+
+    search_dirs = collect_search_dirs()
+    results = []
+    seen_path = set()
+
+    for base in search_dirs:
+        # PATH里通常已经是最终目录，限制深度更浅
+        base_lower = base.lower()
+        if "windows" in base_lower and "system32" in base_lower:
+            # 避免系统目录海量结果
+            continue
+
+        for root, dirnames, filenames in os.walk(base):
+            # 控制深度，避免卡死
+            rel = os.path.relpath(root, base)
+            depth = 0 if rel == "." else rel.count(os.sep) + 1
+            if depth > 4:
+                dirnames[:] = []
+                continue
+
+            for fn in filenames:
+                if not fn.lower().endswith(".exe"):
+                    continue
+                n = fn.lower()
+                if query not in n:
+                    continue
+                full = os.path.join(root, fn)
+                lf = full.lower()
+                if lf in seen_path:
+                    continue
+                seen_path.add(lf)
+                results.append({
+                    "name": os.path.splitext(fn)[0],
+                    "path": full
+                })
+                if len(results) >= max_results:
+                    return results
+
+    # 排序：短路径、名字优先
+    results.sort(key=lambda x: (len(x["path"]), x["name"].lower()))
+    return results
+
+
+class ProgramSearchDialog(wx.Dialog):
+    def __init__(self, parent):
+        super().__init__(parent, title="搜索程序并添加", size=(760, 520))
+        self.selected_item = None
+        self.results_data = []
+
+        panel = wx.Panel(self)
+        root = wx.BoxSizer(wx.VERTICAL)
+
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(wx.StaticText(panel, label="搜索关键词（程序名）:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
+        self.query_ctrl = wx.TextCtrl(panel, size=(260, -1))
+        self.query_ctrl.SetHint("例如：chrome / firefox / code / wechat")
+        row.Add(self.query_ctrl, 0, wx.ALL, 6)
+
+        self.search_btn = wx.Button(panel, label="开始搜索")
+        row.Add(self.search_btn, 0, wx.ALL, 6)
+
+        tips = wx.StaticText(panel, label="提示：搜索范围为常见安装目录，结果可双击直接添加")
+        tips.SetForegroundColour(wx.Colour(100, 100, 100))
+        row.Add(tips, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
+
+        root.Add(row, 0, wx.EXPAND)
+
+        self.list_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        self.list_ctrl.InsertColumn(0, "程序名", width=160)
+        self.list_ctrl.InsertColumn(1, "路径", width=560)
+        root.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        add_btn = wx.Button(panel, wx.ID_OK, "添加所选")
+        cancel_btn = wx.Button(panel, wx.ID_CANCEL, "取消")
+        btn_row.Add(add_btn, 0, wx.ALL, 6)
+        btn_row.Add(cancel_btn, 0, wx.ALL, 6)
+        root.Add(btn_row, 0, wx.ALIGN_CENTER)
+
+        panel.SetSizer(root)
+
+        self.search_btn.Bind(wx.EVT_BUTTON, self.on_search)
+        self.query_ctrl.Bind(wx.EVT_TEXT_ENTER, self.on_search)
+        self.list_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_dbl_click)
+
+    def on_search(self, _):
+        q = self.query_ctrl.GetValue().strip()
+        if not q:
+            wx.MessageBox("请输入搜索关键词", "提示")
+            return
+
+        wx.BeginBusyCursor()
         try:
-            if hwnd and user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
-                window_pid = ctypes.c_ulong()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
-                if window_pid.value == pid:
-                    title = get_window_title(hwnd)
-                    if title:
-                        windows.append(title)
-        except Exception:
-            pass
-        return True
+            results = search_executables(q, max_results=400)
+        finally:
+            if wx.IsBusy():
+                wx.EndBusyCursor()
 
-    user32.EnumWindows(callback, 0)
-    return windows[0] if windows else ""
+        self.results_data = results
+        self.list_ctrl.DeleteAllItems()
+
+        for item in results:
+            self.list_ctrl.Append([item["name"], item["path"]])
+
+        if not results:
+            wx.MessageBox("未找到匹配程序，请尝试更短关键词", "提示")
+
+    def on_dbl_click(self, _):
+        idx = self.list_ctrl.GetFirstSelected()
+        if idx < 0 or idx >= len(self.results_data):
+            return
+        self.selected_item = self.results_data[idx]
+        self.EndModal(wx.ID_OK)
+
+    def get_selected(self):
+        idx = self.list_ctrl.GetFirstSelected()
+        if idx >= 0 and idx < len(self.results_data):
+            return self.results_data[idx]
+        return self.selected_item
 
 
 # ---------------------------
@@ -396,7 +582,6 @@ class HotkeyCaptureDialog(wx.Dialog):
             wx.Bell()
             return
 
-        # 再走统一校验和标准化
         try:
             _, _, normalized = hotkey_to_mod_vk(hk)
             self.captured_hotkey = normalized
@@ -447,7 +632,7 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
 # ---------------------------
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="QuickLauncher - 快捷启动器", size=(840, 530))
+        super().__init__(None, title="QuickLauncher - 快捷启动器", size=(900, 560))
 
         cfg = load_config()
         self.programs = cfg["programs"]
@@ -480,7 +665,7 @@ class QuickLauncherFrame(wx.Frame):
             panel,
             label=(
                 "支持：F1-F12 单键；或 Ctrl/Alt/Shift/Win 组合键\n"
-                "同一浏览器多窗口：可为每条记录设置“窗口关键词”来区分不同窗口"
+                "同一程序多窗口：可设置“窗口关键词”区分（例如 Chrome 工作/娱乐）"
             )
         )
         desc.SetForegroundColour(wx.Colour(100, 100, 100))
@@ -490,7 +675,7 @@ class QuickLauncherFrame(wx.Frame):
         self.list_ctrl.InsertColumn(0, "程序名称", width=130)
         self.list_ctrl.InsertColumn(1, "快捷键", width=120)
         self.list_ctrl.InsertColumn(2, "窗口关键词", width=170)
-        self.list_ctrl.InsertColumn(3, "程序路径", width=320)
+        self.list_ctrl.InsertColumn(3, "程序路径", width=340)
         self.list_ctrl.InsertColumn(4, "启动参数", width=180)
         root.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
 
@@ -500,7 +685,7 @@ class QuickLauncherFrame(wx.Frame):
         add_btn.Bind(wx.EVT_BUTTON, self.on_manual_add)
         btn_row1.Add(add_btn, 0, wx.ALL, 5)
 
-        add_running_btn = wx.Button(panel, label="从运行程序添加")
+        add_running_btn = wx.Button(panel, label="从运行窗口添加")
         add_running_btn.Bind(wx.EVT_BUTTON, self.on_add_from_running)
         btn_row1.Add(add_running_btn, 0, wx.ALL, 5)
 
@@ -672,21 +857,21 @@ class QuickLauncherFrame(wx.Frame):
     # 列表操作
     # ---------------------------
     def on_manual_add(self, _):
-        dialog = wx.Dialog(self, title="添加程序", size=(620, 320))
+        dialog = wx.Dialog(self, title="添加程序", size=(760, 380))
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         # 名称
         row1 = wx.BoxSizer(wx.HORIZONTAL)
         row1.Add(wx.StaticText(panel, label="程序名称:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        name_ctrl = wx.TextCtrl(panel, size=(420, -1))
+        name_ctrl = wx.TextCtrl(panel, size=(520, -1))
         row1.Add(name_ctrl, 1, wx.ALL | wx.EXPAND, 5)
         sizer.Add(row1, 0, wx.ALL | wx.EXPAND, 5)
 
         # 路径
         row2 = wx.BoxSizer(wx.HORIZONTAL)
         row2.Add(wx.StaticText(panel, label="程序路径:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        path_ctrl = wx.TextCtrl(panel, size=(350, -1))
+        path_ctrl = wx.TextCtrl(panel, size=(420, -1))
         row2.Add(path_ctrl, 1, wx.ALL | wx.EXPAND, 5)
 
         def on_browse(_evt):
@@ -701,19 +886,34 @@ class QuickLauncherFrame(wx.Frame):
         browse_btn = wx.Button(panel, label="浏览")
         browse_btn.Bind(wx.EVT_BUTTON, on_browse)
         row2.Add(browse_btn, 0, wx.ALL, 5)
+
+        def on_search(_evt):
+            sd = ProgramSearchDialog(self)
+            if sd.ShowModal() == wx.ID_OK:
+                item = sd.get_selected()
+                if item:
+                    path_ctrl.SetValue(item["path"])
+                    if not name_ctrl.GetValue().strip():
+                        name_ctrl.SetValue(item["name"])
+            sd.Destroy()
+
+        search_btn = wx.Button(panel, label="搜索程序")
+        search_btn.Bind(wx.EVT_BUTTON, on_search)
+        row2.Add(search_btn, 0, wx.ALL, 5)
+
         sizer.Add(row2, 0, wx.ALL | wx.EXPAND, 5)
 
         # 参数
         row3 = wx.BoxSizer(wx.HORIZONTAL)
         row3.Add(wx.StaticText(panel, label="启动参数:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        args_ctrl = wx.TextCtrl(panel, size=(420, -1))
+        args_ctrl = wx.TextCtrl(panel, size=(520, -1))
         row3.Add(args_ctrl, 1, wx.ALL | wx.EXPAND, 5)
         sizer.Add(row3, 0, wx.ALL | wx.EXPAND, 5)
 
         # 窗口关键词
         row4 = wx.BoxSizer(wx.HORIZONTAL)
         row4.Add(wx.StaticText(panel, label="窗口关键词:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        kw_ctrl = wx.TextCtrl(panel, size=(420, -1))
+        kw_ctrl = wx.TextCtrl(panel, size=(520, -1))
         kw_ctrl.SetHint("可选：用于区分同一程序的不同窗口（如 Chrome 多开）")
         row4.Add(kw_ctrl, 1, wx.ALL | wx.EXPAND, 5)
         sizer.Add(row4, 0, wx.ALL | wx.EXPAND, 5)
@@ -728,6 +928,9 @@ class QuickLauncherFrame(wx.Frame):
 
             if not name or not path:
                 wx.MessageBox("请填写程序名称和路径", "提示")
+                return
+            if not os.path.exists(path):
+                wx.MessageBox("程序路径不存在，请检查", "错误", wx.OK | wx.ICON_ERROR)
                 return
 
             self.programs.append({
@@ -755,61 +958,85 @@ class QuickLauncherFrame(wx.Frame):
         dialog.Destroy()
 
     def on_add_from_running(self, _):
+        """
+        修复点：
+        - 按窗口列出，不按 path 去重
+        - 同一 Chrome 多窗口会显示多条
+        - Firefox 也可显示（只要有可见顶层窗口）
+        """
+        windows = enum_visible_app_windows()
         running = []
-        seen_path = set()
 
-        for proc in psutil.process_iter(["exe", "pid", "name"]):
-            try:
-                exe = proc.info.get("exe")
-                if exe and exe.lower().endswith(".exe") and exe not in seen_path:
-                    seen_path.add(exe)
-                    title = get_process_title(proc.info["pid"])
-                    running.append({
-                        "name": os.path.basename(exe).replace(".exe", ""),
-                        "path": exe,
-                        "title": title
-                    })
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-            except Exception:
-                pass
+        for w in windows:
+            pid = w["pid"]
+            title = w["title"]
+            hwnd = w["hwnd"]
+
+            path, proc_name = get_proc_path_and_name(pid)
+            # 某些受限进程拿不到路径，跳过（不可启动）
+            if not path:
+                continue
+            if not path.lower().endswith(".exe"):
+                continue
+
+            base_name = os.path.splitext(os.path.basename(path))[0]
+            show_name = base_name
+
+            running.append({
+                "name": show_name,
+                "path": path,
+                "title": title,
+                "hwnd": hwnd,
+                "pid": pid
+            })
 
         if not running:
-            wx.MessageBox("没有找到可添加的运行程序", "提示")
+            wx.MessageBox("没有找到可添加的运行窗口", "提示")
             return
 
+        # 按标题排序
         running.sort(key=lambda x: (x["title"] or x["name"]).lower())
 
-        dialog = wx.Dialog(self, title="选择运行中的程序", size=(680, 450))
+        dialog = wx.Dialog(self, title="选择运行中的窗口", size=(900, 520))
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        sizer.Add(wx.StaticText(panel, label="双击添加程序（窗口关键词默认取当前窗口标题，可后续修改）："), 0, wx.ALL, 8)
+        sizer.Add(wx.StaticText(panel, label="双击添加（会按“窗口标题”自动填入窗口关键词，可后续修改）"), 0, wx.ALL, 8)
 
-        listbox = wx.ListBox(panel, size=(-1, 340))
-        for p in running:
-            text = f"{p['title']}  ——  {p['name']}" if p["title"] else p["name"]
-            listbox.Append(text)
-        sizer.Add(listbox, 1, wx.EXPAND | wx.ALL, 8)
+        list_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        list_ctrl.InsertColumn(0, "窗口标题", width=360)
+        list_ctrl.InsertColumn(1, "程序名", width=140)
+        list_ctrl.InsertColumn(2, "程序路径", width=360)
+
+        for item in running:
+            idx = list_ctrl.InsertItem(list_ctrl.GetItemCount(), item["title"] or "(无标题)")
+            list_ctrl.SetItem(idx, 1, item["name"])
+            list_ctrl.SetItem(idx, 2, item["path"])
+
+        sizer.Add(list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
 
         def on_double_click(_evt):
-            i = listbox.GetSelection()
-            if i == wx.NOT_FOUND:
+            i = list_ctrl.GetFirstSelected()
+            if i == -1:
                 return
             item = running[i]
+            default_kw = (item["title"] or "").strip()
+            if len(default_kw) > 80:
+                default_kw = default_kw[:80]
+
             self.programs.append({
                 "name": item["name"],
                 "path": item["path"],
                 "args": "",
                 "hotkey": "",
-                "window_keyword": item["title"][:80] if item["title"] else ""
+                "window_keyword": default_kw
             })
             self.persist()
             self.refresh_list()
             self.register_all_hotkeys()
             dialog.Destroy()
 
-        listbox.Bind(wx.EVT_LISTBOX_DCLICK, on_double_click)
+        list_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, on_double_click)
 
         close_btn = wx.Button(panel, wx.ID_CANCEL, "关闭")
         close_btn.Bind(wx.EVT_BUTTON, lambda e: dialog.Destroy())
@@ -841,7 +1068,6 @@ class QuickLauncherFrame(wx.Frame):
         if dlg.ShowModal() == wx.ID_OK:
             hk = normalize_hotkey(dlg.captured_hotkey)
 
-            # 清空快捷键
             if not hk:
                 self.programs[idx]["hotkey"] = ""
                 self.persist()
@@ -851,7 +1077,6 @@ class QuickLauncherFrame(wx.Frame):
                 dlg.Destroy()
                 return
 
-            # 格式校验
             try:
                 _, _, normalized = hotkey_to_mod_vk(hk)
             except ValueError as e:
@@ -859,7 +1084,6 @@ class QuickLauncherFrame(wx.Frame):
                 dlg.Destroy()
                 return
 
-            # 列表内重复校验
             for i, p in enumerate(self.programs):
                 if i != idx and normalize_hotkey(p.get("hotkey", "")) == normalized:
                     wx.MessageBox("该快捷键已被列表中的其他程序使用", "错误", wx.OK | wx.ICON_ERROR)
