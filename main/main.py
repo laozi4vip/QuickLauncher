@@ -8,7 +8,7 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 __author__ = "laozi4vip"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
 __app_name__ = "QuickLauncher"
-__version__ = "2.1"
+__version__ = "2.2"
 __description__ = "Windows 任务栏快捷启动器"
 
 import wx
@@ -56,7 +56,7 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 LAST_ACTIVE_PROFILE_HWND = {}
 
-# ★ 浏览器主进程映射缓存
+# 浏览器主进程映射缓存
 _browser_main_map_cache = {}
 _browser_main_map_ts = 0.0
 
@@ -113,6 +113,7 @@ def load_config():
                 p.setdefault("bind_hwnd", 0)
                 p.setdefault("profile_name", "")
                 p.setdefault("title_sig", "")
+                p.setdefault("browser_fallback_exe", False)  # 新增：浏览器类兜底启动开关
             return {"programs": programs, "autostart": autostart}
         except Exception as e:
             print("load_config error:", e)
@@ -326,24 +327,22 @@ def make_title_signature(title: str):
 
 
 # ---------------------------
-# ★ 判断程序是否属于浏览器
+# 判断程序是否属于浏览器
 # ---------------------------
 def is_browser_program(program):
-    """根据程序路径判断是否属于浏览器"""
     path = program.get("path", "") or ""
     exe_name = os.path.basename(path).lower().replace(".exe", "")
     return exe_name in BROWSER_SET
 
 
+def browser_fallback_enabled(program):
+    return bool(program.get("browser_fallback_exe", False))
+
+
 # ---------------------------
-# ★ 浏览器主进程扫描 & 进程树回溯
+# 浏览器主进程扫描 & 进程树回溯
 # ---------------------------
 def build_browser_main_proc_map():
-    """
-    扫描所有浏览器进程，找出主进程（命令行不含 --type= 的）。
-    返回 {pid: profile_directory}
-    无显式 --profile-directory 的主进程视为 "Default"。
-    """
     main_map = {}
     for proc in psutil.process_iter(['pid', 'name']):
         try:
@@ -354,7 +353,6 @@ def build_browser_main_proc_map():
                 cmdline = proc.cmdline()
             except (psutil.AccessDenied, psutil.ZombieProcess):
                 continue
-            # 主浏览器进程不含 --type= 参数
             if any(a.lower().startswith('--type=') for a in cmdline):
                 continue
             profile = parse_profile_from_cmdline(proc.name(), cmdline)
@@ -367,7 +365,6 @@ def build_browser_main_proc_map():
 
 
 def get_cached_browser_main_map(max_age=3.0):
-    """带缓存的浏览器主进程映射（避免高频调用时重复扫描）"""
     global _browser_main_map_cache, _browser_main_map_ts
     now = time.time()
     if now - _browser_main_map_ts < max_age and _browser_main_map_cache:
@@ -378,9 +375,6 @@ def get_cached_browser_main_map(max_age=3.0):
 
 
 def get_profile_by_pid_tree(pid, main_map):
-    """
-    从窗口的 PID 向上遍历进程树，找到它属于哪个主浏览器进程，返回 profile。
-    """
     if pid in main_map:
         return main_map[pid]
     try:
@@ -403,12 +397,10 @@ def get_profile_by_pid_tree(pid, main_map):
 
 
 # ---------------------------
-# 窗口枚举（★ 使用进程树回溯检测 Profile）
+# 窗口枚举（使用进程树回溯检测 Profile）
 # ---------------------------
 def enum_visible_app_windows():
     windows = []
-
-    # ★ 预先构建浏览器主进程映射
     browser_main_map = get_cached_browser_main_map(max_age=2.0)
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -425,7 +417,6 @@ def enum_visible_app_windows():
 
             pn = (proc_name or "").lower().replace(".exe", "")
             if pn in BROWSER_SET:
-                # ★ 优先通过进程树回溯获取 profile
                 profile = get_profile_by_pid_tree(pid, browser_main_map)
                 if not profile:
                     profile = guess_profile(proc_name, cmdline, title)
@@ -478,7 +469,6 @@ def update_last_active_cache():
 
         exe = (os.path.basename(path) if path else proc_name or "").lower().replace(".exe", "")
         if exe in BROWSER_SET:
-            # ★ 用进程树回溯获取 profile
             browser_main_map = get_cached_browser_main_map(max_age=5.0)
             profile = get_profile_by_pid_tree(pid, browser_main_map)
             if not profile:
@@ -573,23 +563,37 @@ def find_window_for_program(program):
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best_hwnd, _ = scored[0]
 
-    # ★ 浏览器类：必须有正向匹配分数，否则不返回任何窗口（不兜底）
+    # 浏览器类：默认必须有正向匹配分数
     if is_browser_program(program):
         if best_score <= 0:
             return None
         return best_hwnd
 
-    # ★ 非浏览器类：保留原有逻辑，有关键词/profile/title_sig 但分数<=0 则不匹配
+    # 非浏览器类：保留原有逻辑
     if (keyword or profile_name or title_sig) and best_score <= 0:
         return None
     return best_hwnd
 
 
+def launch_program_by_path(path, args):
+    if not os.path.exists(path):
+        wx.MessageBox(f"程序不存在：\n{path}", "错误", wx.OK | wx.ICON_ERROR)
+        return False
+    cmd = [path]
+    if (args or "").strip():
+        try:
+            cmd.extend(shlex.split(args.strip(), posix=False))
+        except Exception:
+            cmd.extend(args.strip().split())
+    subprocess.Popen(cmd)
+    return True
+
+
 def toggle_program(program):
     """
-    ★ 修改版：
-    - 浏览器类：找不到匹配窗口时不启动，直接返回 (None, False)
-    - 非浏览器类：找不到匹配窗口时按路径启动程序
+    返回：(hwnd, acted)
+    - hwnd: 命中的窗口句柄（如有）
+    - acted: 是否执行了动作（切窗/最小化/启动）
     """
     path = program.get("path", "")
     args = program.get("args", "")
@@ -606,23 +610,18 @@ def toggle_program(program):
                 user32.ShowWindow(hwnd, SW_RESTORE)
             user32.SetForegroundWindow(hwnd)
         return hwnd, True
-    else:
-        # ★ 浏览器类：没匹配上就不做任何事
-        if is_browser_program(program):
-            return None, False
 
-        # ★ 非浏览器类：按路径启动
-        if not os.path.exists(path):
-            wx.MessageBox(f"程序不存在：\n{path}", "错误", wx.OK | wx.ICON_ERROR)
-            return None, False
-        cmd = [path]
-        if args.strip():
-            try:
-                cmd.extend(shlex.split(args.strip(), posix=False))
-            except Exception:
-                cmd.extend(args.strip().split())
-        subprocess.Popen(cmd)
+    # 找不到匹配窗口
+    if is_browser_program(program):
+        # 浏览器类：可选 EXE 兜底
+        if browser_fallback_enabled(program):
+            ok = launch_program_by_path(path, args)
+            return None, ok
         return None, False
+
+    # 非浏览器类：按路径启动
+    ok = launch_program_by_path(path, args)
+    return None, ok
 
 
 def ask_profile_input(parent, default_profile=""):
@@ -685,29 +684,25 @@ class HotkeyCaptureDialog(wx.Dialog):
 
 
 def get_icon_path():
-    """获取图标路径，优先从exe同目录查找"""
-    # 打包后从exe所在目录查找
     if getattr(sys, 'frozen', False):
         base = os.path.dirname(sys.executable)
     else:
         base = BASE_DIR
-    
-    # 优先查找 ICO，其次 PNG
+
     for ext in ['icon.ico', 'icon.png']:
         icon_path = os.path.join(base, ext)
         if os.path.exists(icon_path):
             return icon_path
-        # 备选：从当前目录查找
         alt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ext)
         if os.path.exists(alt_path):
             return alt_path
     return None
 
+
 class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
     def __init__(self, frame):
         super().__init__()
         self.frame = frame
-        # 加载图标文件
         icon_path = get_icon_path()
         if icon_path and os.path.exists(icon_path):
             if icon_path.endswith('.png'):
@@ -743,9 +738,8 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
 # ---------------------------
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title=f"{__app_name__} v{__version__}", size=(980, 580))
-        
-        # 设置窗口图标
+        super().__init__(None, title=f"{__app_name__} v{__version__}", size=(1080, 600))
+
         icon_path = get_icon_path()
         if icon_path and os.path.exists(icon_path):
             if icon_path.endswith('.png'):
@@ -755,7 +749,7 @@ class QuickLauncherFrame(wx.Frame):
                 self.SetIcon(icon)
             else:
                 self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_ICO))
-        
+
         cfg = load_config()
         self.programs = cfg["programs"]
         self.autostart = cfg["autostart"]
@@ -780,10 +774,8 @@ class QuickLauncherFrame(wx.Frame):
         update_last_active_cache()
 
     def init_ui(self):
-        # 创建菜单栏
         menubar = wx.MenuBar()
-        
-        # 帮助菜单
+
         help_menu = wx.Menu()
         check_update_item = help_menu.Append(wx.ID_ANY, "检查更新", "检查是否有新版本")
         self.Bind(wx.EVT_MENU, self.check_for_updates, check_update_item)
@@ -792,10 +784,10 @@ class QuickLauncherFrame(wx.Frame):
         help_menu.AppendSeparator()
         exit_item = help_menu.Append(wx.ID_EXIT, "退出", "退出程序")
         self.Bind(wx.EVT_MENU, self.exit_app, exit_item)
-        
+
         menubar.Append(help_menu, "帮助")
         self.SetMenuBar(menubar)
-        
+
         panel = wx.Panel(self)
         root = wx.BoxSizer(wx.VERTICAL)
 
@@ -807,7 +799,8 @@ class QuickLauncherFrame(wx.Frame):
         self.list_ctrl.InsertColumn(4, "HWND", width=90)
         self.list_ctrl.InsertColumn(5, "Profile", width=100)
         self.list_ctrl.InsertColumn(6, "TitleSig", width=180)
-        self.list_ctrl.InsertColumn(7, "路径", width=240)
+        self.list_ctrl.InsertColumn(7, "浏览器兜底", width=90)
+        self.list_ctrl.InsertColumn(8, "路径", width=260)
         root.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
 
         row = wx.BoxSizer(wx.HORIZONTAL)
@@ -843,6 +836,7 @@ class QuickLauncherFrame(wx.Frame):
     def refresh_list(self):
         self.list_ctrl.DeleteAllItems()
         for p in self.programs:
+            fb = "是" if p.get("browser_fallback_exe", False) else "否"
             self.list_ctrl.Append([
                 p.get("name", ""),
                 p.get("hotkey", ""),
@@ -851,6 +845,7 @@ class QuickLauncherFrame(wx.Frame):
                 str(int(p.get("bind_hwnd", 0) or 0)),
                 p.get("profile_name", ""),
                 p.get("title_sig", ""),
+                fb,
                 p.get("path", "")
             ])
 
@@ -879,7 +874,6 @@ class QuickLauncherFrame(wx.Frame):
             self.hide_to_tray()
 
     def on_about(self, _):
-        """显示关于对话框"""
         info = wx.adv.AboutDialogInfo()
         info.SetName(__app_name__)
         info.SetVersion(__version__)
@@ -888,8 +882,7 @@ class QuickLauncherFrame(wx.Frame):
         info.AddDeveloper(__author__)
         wx.adv.AboutBox(info)
 
-    def check_for_updates(self):
-        """检查更新"""
+    def check_for_updates(self, _):
         import urllib.request
         import json
         try:
@@ -899,31 +892,30 @@ class QuickLauncherFrame(wx.Frame):
                 data = json.loads(response.read().decode())
                 latest_version = data.get('tag_name', 'v1.0.0').lstrip('v')
                 current_version = __version__
-                
-                # 比较版本
+
                 def parse_version(v):
                     parts = v.split('.')
                     return [int(p) for p in parts] + [0] * (3 - len(parts))
-                
+
                 latest = parse_version(latest_version)
                 current = parse_version(current_version)
-                
+
                 if latest > current:
-                    dlg = wx.Dialog(self, title="检查更新", size=(400, 180))
+                    dlg = wx.Dialog(self, title="检查更新", size=(420, 190))
                     panel = wx.Panel(dlg)
                     sizer = wx.BoxSizer(wx.VERTICAL)
                     sizer.Add(wx.StaticText(panel, label=f"当前版本：v{current_version}"), 0, wx.ALL, 10)
                     sizer.Add(wx.StaticText(panel, label=f"最新版本：v{latest_version}"), 0, wx.ALL, 10)
                     sizer.Add(wx.StaticText(panel, label="发现新版本！"), 0, wx.ALL, 10)
-                    
+
                     btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
                     ok_btn = wx.Button(panel, label="前往下载")
-                    ok_btn.Bind(lambda e: wx.LaunchBrowserInDefaultBrowser(__github__ + "/releases"))
+                    ok_btn.Bind(wx.EVT_BUTTON, lambda e: wx.LaunchDefaultBrowser(__github__ + "/releases"))
                     btn_sizer.Add(ok_btn, 0, wx.ALL, 5)
                     cancel_btn = wx.Button(panel, wx.ID_CANCEL, "关闭")
                     btn_sizer.Add(cancel_btn, 0, wx.ALL, 5)
-                    sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER|wx.ALL, 10)
-                    
+                    sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+
                     panel.SetSizer(sizer)
                     dlg.ShowModal()
                     dlg.Destroy()
@@ -932,7 +924,7 @@ class QuickLauncherFrame(wx.Frame):
         except Exception as e:
             wx.MessageBox(f"检查更新失败：{str(e)}", "错误", wx.OK | wx.ICON_ERROR)
 
-    def exit_app(self):
+    def exit_app(self, _=None):
         self.exiting = True
         self.Close()
 
@@ -1086,10 +1078,10 @@ class QuickLauncherFrame(wx.Frame):
             self.auto_bind_program_if_needed(idx, save=True)
             old_hwnd = int(p.get("bind_hwnd", 0) or 0)
 
-        hwnd, _focused = toggle_program(p)
+        hwnd, acted = toggle_program(p)
 
-        # ★ 浏览器类：没匹配到窗口（hwnd 为 None 且未聚焦），直接忽略，不做任何事
-        if is_browser_program(p) and hwnd is None and not _focused:
+        # 浏览器类：没匹配且未启动（未执行动作）则直接忽略
+        if is_browser_program(p) and not acted:
             return
 
         changed = False
@@ -1116,7 +1108,7 @@ class QuickLauncherFrame(wx.Frame):
 
     # ---- 添加/编辑 ----
     def on_manual_add(self, _):
-        dlg = wx.Dialog(self, title="手动添加", size=(700, 360))
+        dlg = wx.Dialog(self, title="手动添加", size=(760, 420))
         panel = wx.Panel(dlg)
         s = wx.BoxSizer(wx.VERTICAL)
 
@@ -1133,6 +1125,8 @@ class QuickLauncherFrame(wx.Frame):
         mode.SetStringSelection("title")
         kw = wx.TextCtrl(panel)
         hwnd = wx.TextCtrl(panel, value="0")
+        fallback_cb = wx.CheckBox(panel, label="浏览器找不到窗口时，允许按 EXE 兜底启动")
+        fallback_cb.SetValue(False)
 
         row("名称:", name)
         row("路径:", path)
@@ -1140,6 +1134,7 @@ class QuickLauncherFrame(wx.Frame):
         row("模式:", mode)
         row("关键词:", kw)
         row("HWND:", hwnd)
+        s.Add(fallback_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
 
         b = wx.Button(panel, label="浏览exe")
 
@@ -1150,6 +1145,8 @@ class QuickLauncherFrame(wx.Frame):
                 path.SetValue(pth)
                 if not name.GetValue().strip():
                     name.SetValue(os.path.splitext(os.path.basename(pth))[0])
+                fake_program = {"path": pth}
+                fallback_cb.Enable(is_browser_program(fake_program))
             fd.Destroy()
 
         b.Bind(wx.EVT_BUTTON, browse)
@@ -1174,13 +1171,16 @@ class QuickLauncherFrame(wx.Frame):
                 "match_mode": mode.GetStringSelection() or "title",
                 "bind_hwnd": int(hwnd.GetValue().strip() or "0") if hwnd.GetValue().strip().isdigit() else 0,
                 "profile_name": kw.GetValue().strip() if (mode.GetStringSelection() == "profile") else "",
-                "title_sig": ""
+                "title_sig": "",
+                "browser_fallback_exe": bool(fallback_cb.GetValue())
             }
             if not p["name"] or not p["path"]:
                 wx.MessageBox("名称和路径必填", "提示")
             elif not os.path.exists(p["path"]):
                 wx.MessageBox("路径不存在", "错误")
             else:
+                if not is_browser_program(p):
+                    p["browser_fallback_exe"] = False
                 self.programs.append(p)
                 self.persist()
                 self.refresh_list()
@@ -1198,7 +1198,7 @@ class QuickLauncherFrame(wx.Frame):
         dlg = wx.Dialog(self, title="从运行窗口添加", size=(1020, 520))
         panel = wx.Panel(dlg)
         s = wx.BoxSizer(wx.VERTICAL)
-        tip = wx.StaticText(panel, label="双击添加：浏览器默认用 hwnd 模式 + 自动重绑（Profile 列现在会正确区分）")
+        tip = wx.StaticText(panel, label="双击添加：浏览器默认用 hwnd 模式（可选 EXE 兜底）")
         s.Add(tip, 0, wx.ALL, 8)
 
         lc = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
@@ -1239,6 +1239,7 @@ class QuickLauncherFrame(wx.Frame):
             mode = "hwnd" if proc in BROWSER_SET else "title"
             kw = profile if (mode == "hwnd" and profile) else (it.get("title", "")[:80])
             args = ""
+            fallback = False
 
             if proc in BROWSER_SET:
                 ok, m_profile = ask_profile_input(self, default_profile=profile)
@@ -1246,6 +1247,13 @@ class QuickLauncherFrame(wx.Frame):
                     args = build_profile_args(proc, m_profile)
                     kw = m_profile
                     profile = m_profile
+
+                ask = wx.MessageBox(
+                    "浏览器找不到匹配窗口时，是否允许按 EXE 启动？",
+                    "浏览器 EXE 兜底",
+                    wx.YES_NO | wx.ICON_QUESTION
+                )
+                fallback = (ask == wx.YES)
 
             self.programs.append({
                 "name": it["name"],
@@ -1256,7 +1264,8 @@ class QuickLauncherFrame(wx.Frame):
                 "match_mode": mode,
                 "bind_hwnd": it["hwnd"] if mode == "hwnd" else 0,
                 "profile_name": profile,
-                "title_sig": it.get("title_sig", "")
+                "title_sig": it.get("title_sig", ""),
+                "browser_fallback_exe": fallback
             })
             self.persist()
             self.refresh_list()
@@ -1317,7 +1326,7 @@ class QuickLauncherFrame(wx.Frame):
             wx.MessageBox("请先选择程序", "提示")
             return
         p = self.programs[idx]
-        dlg = wx.Dialog(self, title="设置匹配", size=(560, 300))
+        dlg = wx.Dialog(self, title="设置匹配", size=(620, 360))
         panel = wx.Panel(dlg)
         s = wx.BoxSizer(wx.VERTICAL)
 
@@ -1327,12 +1336,17 @@ class QuickLauncherFrame(wx.Frame):
         hwnd = wx.TextCtrl(panel, value=str(int(p.get("bind_hwnd", 0) or 0)))
         prof = wx.TextCtrl(panel, value=p.get("profile_name", ""))
         tsig = wx.TextCtrl(panel, value=p.get("title_sig", ""))
+        fallback_cb = wx.CheckBox(panel, label="浏览器找不到窗口时，允许 EXE 兜底启动")
+        fallback_cb.SetValue(bool(p.get("browser_fallback_exe", False)))
+        fallback_cb.Enable(is_browser_program(p))
 
         for lab, ctrl in [("模式:", mode), ("关键词:", kw), ("绑定HWND:", hwnd), ("Profile名:", prof), ("TitleSig:", tsig)]:
             r = wx.BoxSizer(wx.HORIZONTAL)
             r.Add(wx.StaticText(panel, label=lab), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
             r.Add(ctrl, 1, wx.ALL | wx.EXPAND, 6)
             s.Add(r, 0, wx.EXPAND)
+
+        s.Add(fallback_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
 
         tip = wx.StaticText(panel, label="浏览器推荐：mode=hwnd，profile_name 填 Profile 目录名（如 Profile 1）")
         tip.SetForegroundColour(wx.Colour(100, 100, 100))
@@ -1356,6 +1370,12 @@ class QuickLauncherFrame(wx.Frame):
                 p["bind_hwnd"] = int(hwnd.GetValue().strip() or "0")
             except Exception:
                 p["bind_hwnd"] = 0
+
+            if is_browser_program(p):
+                p["browser_fallback_exe"] = bool(fallback_cb.GetValue())
+            else:
+                p["browser_fallback_exe"] = False
+
             self.persist()
             self.refresh_list()
             wx.MessageBox("已保存", "成功")
