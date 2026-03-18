@@ -1,39 +1,42 @@
-name: Update Version
+name: Sync Version From Release
 
 on:
   release:
     types: [published]
-  push:
-    tags:
-      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   update-version:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Extract version
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Extract version from release tag
         id: version
         run: |
-          if [ -n "${{ github.event.release }}" ]; then
-            VERSION="${{ github.event.release.tag_name }}"
-          else
-            VERSION="${GITHUB_REF#refs/tags/}"
-          fi
-          echo "VERSION=${VERSION#v}" >> $GITHUB_OUTPUT
+          TAG="${{ github.event.release.tag_name }}"   # e.g. v2.0.1
+          VERSION="${TAG#v}"                           # remove leading v
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Update version in code
+      - name: Update version in file
         run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
+          VERSION="${{ steps.version.outputs.version }}"
           sed -i "s/__version__ = \"[^\"]*\"/__version__ = \"$VERSION\"/" main/main.py
-          cat main/main.py | grep "__version__"
+          grep "__version__" main/main.py
 
       - name: Commit and push
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config user.name "github-actions[bot]"
+          git config user.email "action@github.com"
+
           git add main/main.py
-          git commit -m "更新版本号 v${{ steps.version.outputs.VERSION }}" || echo "No changes to commit"
-          git push
+          git commit -m "chore: bump version to v${{ steps.version.outputs.version }}" || echo "No changes to commit"
+          git push origin "${{ github.event.repository.default_branch }}"
