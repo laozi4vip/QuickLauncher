@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-QuickLauncher - Windows任务栏快捷启动器（浏览器多用户稳定匹配版）
+QuickLauncher - Windows任务栏快捷启动器（浏览器多用户稳定匹配增强版）
 修复重点：
-1) 浏览器窗口不再依赖标题匹配，支持按 profile 稳定匹配（Chrome/Edge/Firefox）
-2) 从运行窗口添加时，浏览器优先写入 profile 规则
-3) 兼容旧配置（无 match_mode 时沿用标题 contains 逻辑）
+1) 浏览器窗口匹配支持 profile（cmdline + 标题兜底推断）
+2) 从运行窗口添加时，浏览器 profile 可手动确认/修正，避免“都一样”
+3) 浏览器新增项自动补启动参数（profile 参数）
+4) 兼容旧配置（无 match_mode 时沿用 title contains 逻辑）
 """
 
 import wx
@@ -17,6 +18,7 @@ import ctypes
 import sys
 import winreg
 import shlex
+import re
 
 # ---------------------------
 # Windows API & 常量
@@ -35,6 +37,8 @@ WS_EX_TOOLWINDOW = 0x00000080
 
 RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_RUN_NAME = "QuickLauncher"
+
+BROWSER_SET = {"chrome", "msedge", "chromium", "brave", "firefox"}
 
 # ---------------------------
 # 配置路径
@@ -269,7 +273,6 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
         v = value_after("--profile-directory")
         if v:
             return v
-        # 部分场景只有 user-data-dir，可退化显示目录名
         u = value_after("--user-data-dir")
         if u:
             return os.path.basename(u.rstrip("\\/"))
@@ -277,7 +280,6 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
 
     # Firefox
     if name == "firefox":
-        # -P Name / --profile Name / -profile path
         for i, a in enumerate(args):
             la = a.lower()
             if la in ("-p", "--profile") and i + 1 < len(args):
@@ -288,6 +290,41 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
         return ""
 
     return ""
+
+
+def parse_profile_from_title(proc_name: str, title: str):
+    """从标题兜底猜 profile（不是100%准确，但能修正很多“都一样”的情况）"""
+    name = (proc_name or "").lower().replace(".exe", "")
+    t = (title or "").strip()
+
+    if not t:
+        return ""
+
+    # 常见：Profile 1 / Profile 2 / Default
+    m = re.search(r"\b(Profile\s*\d+|Default)\b", t, re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+
+    # Edge 常见：Personal / Work
+    if name == "msedge":
+        m2 = re.search(r"\b(Personal|Work|Guest)\b", t, re.IGNORECASE)
+        if m2:
+            return m2.group(1).strip()
+
+    # Firefox 也可能在标题出现 profile 词
+    if name == "firefox":
+        m3 = re.search(r"\b(Profile\s*\d+|Default)\b", t, re.IGNORECASE)
+        if m3:
+            return m3.group(1).strip()
+
+    return ""
+
+
+def guess_profile(proc_name: str, cmdline_list, title: str):
+    p1 = parse_profile_from_cmdline(proc_name, cmdline_list)
+    if p1:
+        return p1
+    return parse_profile_from_title(proc_name, title)
 
 
 def enum_visible_app_windows():
@@ -304,7 +341,7 @@ def enum_visible_app_windows():
             pid = get_pid_from_hwnd(hwnd)
             title = get_window_title(hwnd).strip()
             path, proc_name, cmdline = get_proc_path_name_cmdline(pid)
-            profile = parse_profile_from_cmdline(proc_name, cmdline)
+            profile = guess_profile(proc_name, cmdline, title)
 
             windows.append({
                 "hwnd": int(hwnd),
@@ -324,21 +361,20 @@ def enum_visible_app_windows():
 
 
 def enum_windows_for_program(path):
-    """按程序路径枚举候选窗口（同一程序多个窗口全部保留）"""
     target = os.path.normcase(path or "")
     result = []
 
-    for w in enum_visible_app_windows():
+    all_ws = enum_visible_app_windows()
+    for w in all_ws:
         wpath = os.path.normcase(w.get("path", "") or "")
         if not wpath:
             continue
         if wpath == target:
             result.append((w["hwnd"], w["title"], w["profile"], w["pid"]))
 
-    # 若路径匹配不到，退化为 exe 名匹配
     if not result and path:
         exe_name = os.path.basename(path).lower().replace(".exe", "")
-        for w in enum_visible_app_windows():
+        for w in all_ws:
             pn = (w.get("proc_name", "") or "").lower().replace(".exe", "")
             if pn == exe_name:
                 result.append((w["hwnd"], w["title"], w["profile"], w["pid"]))
@@ -358,7 +394,6 @@ def find_window_for_program(program):
 
     if keyword:
         if match_mode == "profile":
-            # 按 profile 精确/包含匹配
             filtered = []
             for h, t, prof, pid in candidates:
                 p = (prof or "").strip().lower()
@@ -366,7 +401,6 @@ def find_window_for_program(program):
                     filtered.append((h, t, prof, pid))
             candidates = filtered
         else:
-            # 标题匹配
             candidates = [(h, t, prof, pid) for (h, t, prof, pid) in candidates if keyword in (t or "").lower()]
 
     if not candidates:
@@ -413,6 +447,31 @@ def toggle_program(program):
                 cmd.extend(args.strip().split())
 
         subprocess.Popen(cmd)
+
+
+def build_profile_args(proc_name: str, profile: str):
+    pn = (proc_name or "").lower().replace(".exe", "")
+    pf = (profile or "").strip()
+    if not pf:
+        return ""
+    if pn in ("chrome", "msedge", "chromium", "brave"):
+        return f'--profile-directory="{pf}"'
+    if pn == "firefox":
+        return f'-P "{pf}"'
+    return ""
+
+
+def ask_profile_input(parent, default_profile=""):
+    dlg = wx.TextEntryDialog(
+        parent,
+        "请输入浏览器 Profile（例如：Profile 1 / Default / Work）",
+        "确认 Profile",
+        value=default_profile or ""
+    )
+    ret = dlg.ShowModal()
+    val = dlg.GetValue().strip() if ret == wx.ID_OK else ""
+    dlg.Destroy()
+    return ret == wx.ID_OK, val
 
 
 # ---------------------------
@@ -695,7 +754,7 @@ class QuickLauncherFrame(wx.Frame):
             panel,
             label=(
                 "建议：浏览器多用户请使用“匹配模式=profile”，关键词填 Profile 1 / Profile 2 / Default\n"
-                "标题会变化，profile 更稳定"
+                "若运行窗口识别不准，添加时可手动改 profile"
             )
         )
         desc.SetForegroundColour(wx.Colour(100, 100, 100))
@@ -768,7 +827,6 @@ class QuickLauncherFrame(wx.Frame):
                 p.get("args", "")
             ])
 
-    # 托盘 / 关闭
     def hide_to_tray(self):
         self.Hide()
         self.update_status("已最小化到托盘（双击托盘图标可恢复）")
@@ -794,7 +852,6 @@ class QuickLauncherFrame(wx.Frame):
         self.exiting = True
         self.Close()
 
-    # 配置
     def persist(self):
         save_config(self.programs, self.autostart_cb.GetValue())
 
@@ -809,7 +866,6 @@ class QuickLauncherFrame(wx.Frame):
         self.persist()
         wx.MessageBox("设置已保存", "成功", wx.OK | wx.ICON_INFORMATION)
 
-    # 热键
     def unregister_all_hotkeys(self):
         for hotkey_id in self.registered_hotkey_ids:
             try:
@@ -870,7 +926,6 @@ class QuickLauncherFrame(wx.Frame):
             self.update_status("切换失败")
             wx.MessageBox(f"切换失败：{e}", "错误", wx.OK | wx.ICON_ERROR)
 
-    # 列表操作
     def on_manual_add(self, _):
         dialog = wx.Dialog(self, title="添加程序", size=(760, 420))
         panel = wx.Panel(dialog)
@@ -1000,12 +1055,12 @@ class QuickLauncherFrame(wx.Frame):
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        sizer.Add(wx.StaticText(panel, label="双击添加。浏览器优先按 profile 匹配（更稳定）"), 0, wx.ALL, 8)
+        sizer.Add(wx.StaticText(panel, label="双击添加。浏览器会优先 profile 匹配；若不准会让你手动确认"), 0, wx.ALL, 8)
 
         list_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         list_ctrl.InsertColumn(0, "窗口标题", width=340)
         list_ctrl.InsertColumn(1, "程序名", width=120)
-        list_ctrl.InsertColumn(2, "Profile", width=140)
+        list_ctrl.InsertColumn(2, "Profile(推断)", width=140)
         list_ctrl.InsertColumn(3, "程序路径", width=340)
 
         for item in running:
@@ -1026,18 +1081,27 @@ class QuickLauncherFrame(wx.Frame):
             profile = (item.get("profile", "") or "").strip()
             title = (item.get("title", "") or "").strip()
 
-            # 浏览器优先 profile，其他程序默认 title
-            if proc in ("chrome", "msedge", "chromium", "brave", "firefox") and profile:
+            if proc in BROWSER_SET:
                 mode = "profile"
-                kw = profile
+
+                ok, manual_profile = ask_profile_input(self, default_profile=profile)
+                if not ok:
+                    return
+                if not manual_profile:
+                    wx.MessageBox("浏览器建议填写 profile（例如 Profile 1 / Default）", "提示")
+                    return
+
+                kw = manual_profile
+                auto_args = build_profile_args(proc, manual_profile)
             else:
                 mode = "title"
                 kw = title[:80]
+                auto_args = ""
 
             self.programs.append({
                 "name": item["name"],
                 "path": item["path"],
-                "args": "",
+                "args": auto_args,
                 "hotkey": "",
                 "window_keyword": kw,
                 "match_mode": mode
