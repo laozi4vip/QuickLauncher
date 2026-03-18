@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-QuickLauncher - Windows任务栏快捷启动器
-功能：
-- 绑定程序到快捷键
-- 按快捷键启动/切换窗口（前台则最小化）
-- 托盘常驻
-- 开机启动（当前用户）
+QuickLauncher - Windows 托盘快捷启动器
+新增：
+1) profile_keyword：用于区分同一 exe 的不同 profile（如 Chrome/Edge）
+2) 匹配时同时检查：进程命令行 + 窗口标题
 """
+
 import wx
 import wx.adv
 import os
@@ -16,544 +15,812 @@ import psutil
 import ctypes
 import sys
 import winreg
+import shlex
 
-# ---------------- Windows API ----------------
+# ---------------------------
+# Windows API & 常量
+# ---------------------------
 user32 = ctypes.windll.user32
 SW_MINIMIZE = 6
 SW_RESTORE = 9
 
-# ---------------- 路径与配置 ----------------
-if getattr(sys, 'frozen', False):
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
+
+GWL_EXSTYLE = -20
+WS_EX_TOOLWINDOW = 0x00000080
+
+RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+APP_RUN_NAME = "QuickLauncher"
+
+# ---------------------------
+# 配置路径
+# ---------------------------
+if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
-    APP_CMD = f'"{sys.executable}"'
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    APP_CMD = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-RUN_NAME = "QuickLauncher"
+
+
+def get_launch_command():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+
+
+def is_autostart_enabled():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY_PATH, 0, winreg.KEY_READ) as key:
+            val, _ = winreg.QueryValueEx(key, APP_RUN_NAME)
+            return bool(val)
+    except Exception:
+        return False
+
+
+def set_autostart(enable: bool):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY_PATH, 0, winreg.KEY_SET_VALUE) as key:
+            if enable:
+                winreg.SetValueEx(key, APP_RUN_NAME, 0, winreg.REG_SZ, get_launch_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_RUN_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception as e:
+        print("set_autostart error:", e)
+        return False
 
 
 def load_config():
+    default_data = {"programs": [], "autostart": is_autostart_enabled()}
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data.get('programs', [])
+
+            programs = data.get("programs", [])
+            autostart = data.get("autostart", is_autostart_enabled())
+
+            for p in programs:
+                p.setdefault("name", "")
+                p.setdefault("path", "")
+                p.setdefault("args", "")
+                p.setdefault("hotkey", "")
+                p.setdefault("window_keyword", "")
+                p.setdefault("profile_keyword", "")  # 新增字段兼容
+
+            return {"programs": programs, "autostart": autostart}
         except Exception as e:
             print("load_config error:", e)
-    return []
+    return default_data
 
 
-def save_config(programs):
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump({'programs': programs}, f, ensure_ascii=False, indent=4)
+def save_config(programs, autostart):
+    data = {"programs": programs, "autostart": autostart}
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 
-def find_window(exe_name):
-    exe_name = exe_name.lower().replace('.exe', '')
-    candidate_hwnds = []
+# ---------------------------
+# 热键
+# ---------------------------
+def normalize_hotkey(hotkey: str) -> str:
+    return (hotkey or "").strip().lower().replace(" ", "")
 
-    def callback(hwnd, param):
+
+def hotkey_to_mod_vk(hotkey: str):
+    hotkey = normalize_hotkey(hotkey)
+    if not hotkey:
+        raise ValueError("快捷键不能为空")
+
+    parts = hotkey.split("+")
+    if any(p == "" for p in parts):
+        raise ValueError("快捷键格式错误")
+
+    key_map = {str(i): 0x30 + i for i in range(10)}
+    for i in range(26):
+        key_map[chr(ord("a") + i)] = 0x41 + i
+    for i in range(1, 13):
+        key_map[f"f{i}"] = 0x70 + (i - 1)
+
+    mods = 0
+    main_key = None
+
+    for p in parts:
+        if p == "ctrl":
+            mods |= MOD_CONTROL
+        elif p == "alt":
+            mods |= MOD_ALT
+        elif p == "shift":
+            mods |= MOD_SHIFT
+        elif p == "win":
+            mods |= MOD_WIN
+        else:
+            if main_key is not None:
+                raise ValueError("只能有一个主键")
+            if p not in key_map:
+                raise ValueError(f"不支持的主键：{p}")
+            main_key = p
+
+    if main_key is None:
+        raise ValueError("缺少主键")
+    if mods == 0 and not main_key.startswith("f"):
+        raise ValueError("无修饰键仅支持 F1-F12")
+
+    ordered = []
+    if mods & MOD_CONTROL:
+        ordered.append("ctrl")
+    if mods & MOD_SHIFT:
+        ordered.append("shift")
+    if mods & MOD_ALT:
+        ordered.append("alt")
+    if mods & MOD_WIN:
+        ordered.append("win")
+
+    normalized = "+".join(ordered + [main_key]) if ordered else main_key
+    return mods, key_map[main_key], normalized
+
+
+def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
+    key = event.GetKeyCode()
+    main_key = None
+
+    if wx.WXK_F1 <= key <= wx.WXK_F12:
+        main_key = f"f{key - wx.WXK_F1 + 1}"
+    elif ord("0") <= key <= ord("9"):
+        main_key = chr(key).lower()
+    elif ord("A") <= key <= ord("Z"):
+        main_key = chr(key).lower()
+    elif ord("a") <= key <= ord("z"):
+        main_key = chr(key).lower()
+    else:
+        return ""
+
+    mods = []
+    if event.ControlDown():
+        mods.append("ctrl")
+    if event.ShiftDown():
+        mods.append("shift")
+    if event.AltDown():
+        mods.append("alt")
+    if event.MetaDown():
+        mods.append("win")
+
+    if not mods and not main_key.startswith("f"):
+        return ""
+
+    return "+".join(mods + [main_key]) if mods else main_key
+
+
+# ---------------------------
+# 窗口/进程工具
+# ---------------------------
+def get_window_title(hwnd):
+    length = user32.GetWindowTextLengthW(hwnd)
+    if length <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value or ""
+
+
+def get_pid_from_hwnd(hwnd):
+    pid = ctypes.c_ulong()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def is_alt_tab_window(hwnd):
+    if not user32.IsWindowVisible(hwnd):
+        return False
+
+    title = get_window_title(hwnd).strip()
+    if not title:
+        return False
+
+    exstyle = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    if exstyle & WS_EX_TOOLWINDOW:
+        return False
+
+    return True
+
+
+def get_proc_path_name_cmdline(pid):
+    try:
+        p = psutil.Process(pid)
+        path = p.exe() or ""
+        name = p.name() or ""
         try:
-            if user32.IsWindowVisible(hwnd) and user32.IsWindowEnabled(hwnd):
-                pid = ctypes.c_ulong()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                try:
-                    proc = psutil.Process(pid.value)
-                    proc_name = proc.name().lower().replace('.exe', '')
-                    if exe_name == proc_name:
-                        candidate_hwnds.append(hwnd)
-                except Exception:
-                    pass
+            cmdline = " ".join(p.cmdline()).strip().lower()
+        except Exception:
+            cmdline = ""
+        return path, name, cmdline
+    except Exception:
+        return "", "", ""
+
+
+def enum_windows_for_exe(exe_name: str):
+    exe_name = exe_name.lower().replace(".exe", "")
+    result = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def callback(hwnd, _):
+        try:
+            if not is_alt_tab_window(hwnd):
+                return True
+
+            pid = get_pid_from_hwnd(hwnd)
+            path, name, cmdline = get_proc_path_name_cmdline(pid)
+            proc_name = (name or "").lower().replace(".exe", "")
+            if proc_name != exe_name:
+                return True
+
+            result.append({
+                "hwnd": int(hwnd),
+                "pid": int(pid),
+                "title": get_window_title(hwnd).strip(),
+                "path": path,
+                "cmdline": cmdline
+            })
         except Exception:
             pass
         return True
 
-    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-    user32.EnumWindows(WNDENUMPROC(callback), 0)
+    user32.EnumWindows(callback, 0)
+    return result
 
-    fg_hwnd = user32.GetForegroundWindow()
-    if fg_hwnd in candidate_hwnds:
-        return fg_hwnd
-    return candidate_hwnds[0] if candidate_hwnds else None
+
+def find_window_for_program(program):
+    path = program.get("path", "")
+    if not path:
+        return None
+
+    exe_name = os.path.basename(path).lower().replace(".exe", "")
+    window_keyword = (program.get("window_keyword", "") or "").strip().lower()
+    profile_keyword = (program.get("profile_keyword", "") or "").strip().lower()
+
+    candidates = enum_windows_for_exe(exe_name)
+    if not candidates:
+        return None
+
+    # 先按 profile_keyword 过滤（命令行 + 标题）
+    if profile_keyword:
+        filtered = []
+        for c in candidates:
+            hay = f'{c.get("cmdline","")} {c.get("title","").lower()}'
+            if profile_keyword in hay:
+                filtered.append(c)
+        candidates = filtered if filtered else candidates
+
+    # 再按 window_keyword 过滤（标题）
+    if window_keyword:
+        filtered = [c for c in candidates if window_keyword in (c.get("title", "").lower())]
+        candidates = filtered if filtered else candidates
+
+    if not candidates:
+        return None
+
+    fg = user32.GetForegroundWindow()
+
+    # 优先前台窗口命中
+    for c in candidates:
+        if c["hwnd"] == fg:
+            return c["hwnd"]
+
+    # 再选未最小化
+    for c in candidates:
+        if not user32.IsIconic(c["hwnd"]):
+            return c["hwnd"]
+
+    return candidates[0]["hwnd"]
 
 
 def toggle_program(program):
-    path = program.get('path', '')
+    path = program.get("path", "")
+    args = program.get("args", "")
+
     if not path:
         return
 
-    exe_name = os.path.basename(path).lower().replace('.exe', '')
-    hwnd = find_window(exe_name)
+    hwnd = find_window_for_program(program)
 
     if hwnd:
-        fg_hwnd = user32.GetForegroundWindow()
-        if hwnd == fg_hwnd:
+        fg = user32.GetForegroundWindow()
+        if hwnd == fg:
             user32.ShowWindow(hwnd, SW_MINIMIZE)
         else:
             if user32.IsIconic(hwnd):
                 user32.ShowWindow(hwnd, SW_RESTORE)
             user32.SetForegroundWindow(hwnd)
     else:
-        if os.path.exists(path):
-            subprocess.Popen(path)
+        if not os.path.exists(path):
+            wx.MessageBox(f"程序不存在：\n{path}", "错误", wx.OK | wx.ICON_ERROR)
+            return
 
-
-def get_process_title(pid):
-    try:
-        windows = []
-
-        def callback(hwnd, wins):
+        cmd = [path]
+        if args.strip():
             try:
-                if hwnd and user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd):
-                    window_pid = ctypes.c_ulong()
-                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
-                    if window_pid.value == pid:
-                        length = user32.GetWindowTextLengthW(hwnd)
-                        if length > 0:
-                            title = ctypes.create_unicode_buffer(length + 1)
-                            user32.GetWindowTextW(hwnd, title, length + 1)
-                            wins.append(title.value)
+                cmd.extend(shlex.split(args.strip(), posix=False))
             except Exception:
-                pass
-            return True
+                cmd.extend(args.strip().split())
 
-        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
-        user32.EnumWindows(WNDENUMPROC(callback), windows)
-
-        for title in windows:
-            if title:
-                return title
-    except Exception:
-        pass
-    return ""
+        subprocess.Popen(cmd)
 
 
-# ---------------- 开机启动 ----------------
-def is_startup_enabled():
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ) as key:
-            val, _ = winreg.QueryValueEx(key, RUN_NAME)
-            return val == APP_CMD
-    except FileNotFoundError:
-        return False
-    except Exception as e:
-        print("is_startup_enabled error:", e)
-        return False
+# ---------------------------
+# 对话框
+# ---------------------------
+class HotkeyCaptureDialog(wx.Dialog):
+    def __init__(self, parent, current_hotkey=""):
+        super().__init__(parent, title="设置快捷键（按键自动录入）", size=(500, 230))
+        self.captured_hotkey = normalize_hotkey(current_hotkey)
+
+        panel = wx.Panel(self)
+        s = wx.BoxSizer(wx.VERTICAL)
+
+        tips = wx.StaticText(panel, label="直接按目标快捷键（Esc取消，Backspace清空）")
+        tips.SetForegroundColour(wx.Colour(90, 90, 90))
+        s.Add(tips, 0, wx.ALL, 10)
+
+        self.hk_show = wx.TextCtrl(panel, value=self.captured_hotkey, style=wx.TE_READONLY)
+        s.Add(self.hk_show, 0, wx.ALL | wx.EXPAND, 10)
+
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(wx.Button(panel, wx.ID_OK, "确定"), 0, wx.ALL, 5)
+        row.Add(wx.Button(panel, wx.ID_CANCEL, "取消"), 0, wx.ALL, 5)
+        clear_btn = wx.Button(panel, wx.ID_ANY, "清空")
+        row.Add(clear_btn, 0, wx.ALL, 5)
+        s.Add(row, 0, wx.ALIGN_CENTER)
+
+        panel.SetSizer(s)
+
+        self.Bind(wx.EVT_CHAR_HOOK, self.on_char_hook)
+        clear_btn.Bind(wx.EVT_BUTTON, self.on_clear)
+
+    def on_clear(self, _):
+        self.captured_hotkey = ""
+        self.hk_show.SetValue("")
+
+    def on_char_hook(self, event):
+        key = event.GetKeyCode()
+
+        if key == wx.WXK_ESCAPE:
+            self.EndModal(wx.ID_CANCEL)
+            return
+        if key in (wx.WXK_BACK, wx.WXK_DELETE):
+            self.on_clear(None)
+            return
+
+        hk = wx_event_to_hotkey(event)
+        if not hk:
+            wx.Bell()
+            return
+
+        try:
+            _, _, normalized = hotkey_to_mod_vk(hk)
+            self.captured_hotkey = normalized
+            self.hk_show.SetValue(normalized)
+        except ValueError:
+            wx.Bell()
 
 
-def set_startup(enable: bool):
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            if enable:
-                winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, APP_CMD)
-            else:
-                try:
-                    winreg.DeleteValue(key, RUN_NAME)
-                except FileNotFoundError:
-                    pass
-        return True
-    except Exception as e:
-        print("set_startup error:", e)
-        return False
-
-
-# ---------------- 热键解析 ----------------
-def parse_hotkey(text: str):
-    """
-    输入:
-      - 单键: f1 ~ f12
-      - 组合: alt+1 / ctrl+shift+a / win+f2
-    输出: (modifiers, keycode) or (None, None)
-    """
-    if not text:
-        return None, None
-
-    s = text.strip().lower().replace(' ', '')
-    parts = s.split('+')
-
-    # 允许单键（仅 F1-F12）
-    if len(parts) == 1:
-        key_part = parts[0]
-        mod_parts = []
-    else:
-        key_part = parts[-1]
-        mod_parts = parts[:-1]
-
-    modifiers = 0
-    for m in mod_parts:
-        if m == 'ctrl':
-            modifiers |= wx.MOD_CONTROL
-        elif m == 'shift':
-            modifiers |= wx.MOD_SHIFT
-        elif m == 'alt':
-            modifiers |= wx.MOD_ALT
-        elif m in ('win', 'cmd', 'meta'):
-            modifiers |= wx.MOD_WIN
-        else:
-            return None, None
-
-    f_map = {
-        'f1': wx.WXK_F1, 'f2': wx.WXK_F2, 'f3': wx.WXK_F3, 'f4': wx.WXK_F4,
-        'f5': wx.WXK_F5, 'f6': wx.WXK_F6, 'f7': wx.WXK_F7, 'f8': wx.WXK_F8,
-        'f9': wx.WXK_F9, 'f10': wx.WXK_F10, 'f11': wx.WXK_F11, 'f12': wx.WXK_F12
-    }
-
-    # 单键只允许 F1-F12；组合可用 F 键或字母数字
-    if key_part in f_map:
-        keycode = f_map[key_part]
-    elif len(mod_parts) > 0 and len(key_part) == 1 and key_part.isalnum():
-        keycode = ord(key_part.upper())
-    else:
-        return None, None
-
-    return modifiers, keycode
-
-
-# ---------------- 托盘图标 ----------------
-class TrayIcon(wx.adv.TaskBarIcon):
-    TBMENU_SHOW = wx.NewIdRef()
-    TBMENU_STARTUP = wx.NewIdRef()
-    TBMENU_EXIT = wx.NewIdRef()
-
+# ---------------------------
+# 托盘
+# ---------------------------
+class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
     def __init__(self, frame):
         super().__init__()
         self.frame = frame
-        self.set_icon()
-        self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, self.on_show)
 
-    def set_icon(self):
         bmp = wx.ArtProvider.GetBitmap(wx.ART_EXECUTABLE_FILE, wx.ART_OTHER, (16, 16))
         icon = wx.Icon()
         icon.CopyFromBitmap(bmp)
         self.SetIcon(icon, "QuickLauncher")
 
+        self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, self.on_show)
+
     def CreatePopupMenu(self):
         menu = wx.Menu()
-        menu.Append(self.TBMENU_SHOW, "显示主窗口")
-        startup_text = "关闭开机启动" if is_startup_enabled() else "开启开机启动"
-        menu.Append(self.TBMENU_STARTUP, startup_text)
+        show_item = menu.Append(wx.ID_ANY, "显示主窗口")
+        hide_item = menu.Append(wx.ID_ANY, "隐藏到托盘")
         menu.AppendSeparator()
-        menu.Append(self.TBMENU_EXIT, "退出")
+        exit_item = menu.Append(wx.ID_EXIT, "退出")
 
-        self.Bind(wx.EVT_MENU, self.on_show, id=self.TBMENU_SHOW)
-        self.Bind(wx.EVT_MENU, self.on_toggle_startup, id=self.TBMENU_STARTUP)
-        self.Bind(wx.EVT_MENU, self.on_exit, id=self.TBMENU_EXIT)
+        self.Bind(wx.EVT_MENU, self.on_show, show_item)
+        self.Bind(wx.EVT_MENU, self.on_hide, hide_item)
+        self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
         return menu
 
-    def on_show(self, event):
+    def on_show(self, _):
         self.frame.show_from_tray()
 
-    def on_toggle_startup(self, event):
-        enabled = is_startup_enabled()
-        ok = set_startup(not enabled)
-        if ok:
-            self.frame.update_startup_button()
-            wx.MessageBox("已更新开机启动状态", "提示")
-        else:
-            wx.MessageBox("设置失败，请检查权限", "错误")
+    def on_hide(self, _):
+        self.frame.hide_to_tray()
 
-    def on_exit(self, event):
-        self.frame.real_exit()
+    def on_exit(self, _):
+        self.frame.exit_app()
 
 
-# ---------------- 主窗口 ----------------
+# ---------------------------
+# 主窗口
+# ---------------------------
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="QuickLauncher - 快捷启动器", size=(700, 500))
-        self.programs = load_config()
+        super().__init__(None, title="QuickLauncher - 快捷启动器", size=(1020, 580))
 
-        self.hotkey_id_base = 3000
-        self.id_to_index = {}
-        self.registered_ids = []
+        cfg = load_config()
+        self.programs = cfg["programs"]
+        self.autostart = cfg["autostart"]
 
-        self._really_close = False
-        self.tray = TrayIcon(self)
+        self.hotkey_id_to_index = {}
+        self.registered_hotkey_ids = []
+        self.exiting = False
 
         self.init_ui()
         self.Centre()
 
-        self.Bind(wx.EVT_CLOSE, self.on_close)
-        self.Bind(wx.EVT_HOTKEY, self.on_hotkey)
+        self.taskbar = QuickLauncherTaskBar(self)
 
-        self.register_hotkeys()
+        self.refresh_list()
+        self.register_all_hotkeys()
+        self.update_status("运行中...")
+
+        self.Bind(wx.EVT_CLOSE, self.on_close)
 
     def init_ui(self):
         panel = wx.Panel(self)
-        sizer = wx.BoxSizer(wx.VERTICAL)
+        root = wx.BoxSizer(wx.VERTICAL)
 
-        title = wx.StaticText(panel, label="程序列表", style=wx.ALIGN_CENTER)
-        title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        sizer.Add(title, 0, wx.ALL | wx.ALIGN_CENTER, 10)
-
-        desc = wx.StaticText(panel, label="设置快捷键快速启动/切换程序\n窗口在前台时按快捷键会最小化，再按恢复")
-        desc.SetForegroundColour(wx.Colour(100, 100, 100))
-        sizer.Add(desc, 0, wx.ALL | wx.ALIGN_CENTER, 5)
+        root.Add(wx.StaticText(panel, label="程序列表"), 0, wx.ALL | wx.ALIGN_CENTER, 10)
 
         self.list_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        self.list_ctrl.InsertColumn(0, "程序名称", width=150)
-        self.list_ctrl.InsertColumn(1, "快捷键", width=120)
-        self.list_ctrl.InsertColumn(2, "程序路径", width=380)
-        sizer.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
+        self.list_ctrl.InsertColumn(0, "程序名", width=120)
+        self.list_ctrl.InsertColumn(1, "快捷键", width=110)
+        self.list_ctrl.InsertColumn(2, "Profile关键词", width=160)
+        self.list_ctrl.InsertColumn(3, "窗口关键词", width=180)
+        self.list_ctrl.InsertColumn(4, "程序路径", width=320)
+        self.list_ctrl.InsertColumn(5, "启动参数", width=160)
+        root.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
 
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_add = wx.Button(panel, label="手动添加")
+        btn_del = wx.Button(panel, label="删除")
+        btn_hotkey = wx.Button(panel, label="设置快捷键")
+        btn_profile = wx.Button(panel, label="设置Profile关键词")
+        btn_kw = wx.Button(panel, label="设置窗口关键词")
+        btn_hide = wx.Button(panel, label="最小化到托盘")
 
-        add_btn = wx.Button(panel, label="手动添加")
-        add_btn.Bind(wx.EVT_BUTTON, self.on_manual_add)
-        btn_sizer.Add(add_btn, 0, wx.ALL, 5)
+        btn_add.Bind(wx.EVT_BUTTON, self.on_manual_add)
+        btn_del.Bind(wx.EVT_BUTTON, self.on_delete)
+        btn_hotkey.Bind(wx.EVT_BUTTON, self.on_set_hotkey)
+        btn_profile.Bind(wx.EVT_BUTTON, self.on_set_profile_keyword)
+        btn_kw.Bind(wx.EVT_BUTTON, self.on_set_window_keyword)
+        btn_hide.Bind(wx.EVT_BUTTON, lambda e: self.hide_to_tray())
 
-        add_running_btn = wx.Button(panel, label="从运行程序添加")
-        add_running_btn.Bind(wx.EVT_BUTTON, self.on_add_from_running)
-        btn_sizer.Add(add_running_btn, 0, wx.ALL, 5)
+        for b in [btn_add, btn_del, btn_hotkey, btn_profile, btn_kw, btn_hide]:
+            row.Add(b, 0, wx.ALL, 5)
+        root.Add(row, 0, wx.ALIGN_CENTER)
 
-        del_btn = wx.Button(panel, label="删除")
-        del_btn.Bind(wx.EVT_BUTTON, self.on_delete)
-        btn_sizer.Add(del_btn, 0, wx.ALL, 5)
+        row2 = wx.BoxSizer(wx.HORIZONTAL)
+        self.autostart_cb = wx.CheckBox(panel, label="开机自启")
+        self.autostart_cb.SetValue(self.autostart)
+        row2.Add(self.autostart_cb, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 8)
 
-        set_btn = wx.Button(panel, label="设置快捷键")
-        set_btn.Bind(wx.EVT_BUTTON, self.on_set_hotkey)
-        btn_sizer.Add(set_btn, 0, wx.ALL, 5)
+        btn_apply = wx.Button(panel, label="保存设置")
+        btn_apply.Bind(wx.EVT_BUTTON, self.on_apply_settings)
+        row2.Add(btn_apply, 0, wx.ALL, 5)
+        root.Add(row2, 0, wx.ALIGN_CENTER)
 
-        self.startup_btn = wx.Button(panel, label="")
-        self.startup_btn.Bind(wx.EVT_BUTTON, self.on_toggle_startup)
-        btn_sizer.Add(self.startup_btn, 0, wx.ALL, 5)
-        self.update_startup_button()
+        self.status_text = wx.StaticText(panel, label="就绪")
+        root.Add(self.status_text, 0, wx.ALL | wx.ALIGN_CENTER, 6)
 
-        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER)
+        panel.SetSizer(root)
 
-        self.status_text = wx.StaticText(panel, label="运行中（已启用托盘）")
-        sizer.Add(self.status_text, 0, wx.ALL | wx.ALIGN_CENTER, 6)
-
-        panel.SetSizer(sizer)
-        self.refresh_list()
-
-    def update_startup_button(self):
-        self.startup_btn.SetLabel("关闭开机启动" if is_startup_enabled() else "开启开机启动")
+    def update_status(self, text):
+        self.status_text.SetLabel(text)
 
     def refresh_list(self):
         self.list_ctrl.DeleteAllItems()
         for p in self.programs:
-            self.list_ctrl.Append([p.get('name', ''), p.get('hotkey', ''), p.get('path', '')])
+            self.list_ctrl.Append([
+                p.get("name", ""),
+                p.get("hotkey", ""),
+                p.get("profile_keyword", ""),
+                p.get("window_keyword", ""),
+                p.get("path", ""),
+                p.get("args", "")
+            ])
 
-    # ---------- 热键 ----------
-    def unregister_hotkeys(self):
-        for hid in self.registered_ids:
-            try:
-                self.UnregisterHotKey(hid)
-            except Exception:
-                pass
-        self.registered_ids.clear()
-        self.id_to_index.clear()
+    def persist(self):
+        save_config(self.programs, self.autostart_cb.GetValue())
 
-    def register_hotkeys(self):
-        self.unregister_hotkeys()
-        for i, p in enumerate(self.programs):
-            hk = p.get('hotkey', '').strip()
-            if not hk:
-                continue
-            modifiers, keycode = parse_hotkey(hk)
-            if modifiers is None:
-                print(f"无效热键格式: {hk}")
-                continue
-
-            hid = self.hotkey_id_base + i
-            ok = self.RegisterHotKey(hid, modifiers, keycode)
-            if ok:
-                self.registered_ids.append(hid)
-                self.id_to_index[hid] = i
-            else:
-                print(f"注册热键失败（可能冲突）: {hk}")
-
-    def on_hotkey(self, event):
-        hid = event.GetId()
-        idx = self.id_to_index.get(hid)
-        if idx is None or idx >= len(self.programs):
-            return
-        program = self.programs[idx]
-        toggle_program(program)
-        self.status_text.SetLabel(f"已切换: {program.get('name', '')}")
-
-    # ---------- 事件 ----------
-    def on_manual_add(self, event):
-        dialog = wx.Dialog(self, title="添加程序", size=(560, 200))
-        panel = wx.Panel(dialog)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-
-        name_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        name_sizer.Add(wx.StaticText(panel, label="程序名称:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        name_ctrl = wx.TextCtrl(panel, size=(360, -1))
-        name_sizer.Add(name_ctrl, 1, wx.EXPAND | wx.ALL, 5)
-        sizer.Add(name_sizer, 0, wx.EXPAND | wx.ALL, 5)
-
-        path_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        path_sizer.Add(wx.StaticText(panel, label="程序路径:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        path_ctrl = wx.TextCtrl(panel, size=(280, -1))
-        path_sizer.Add(path_ctrl, 1, wx.EXPAND | wx.ALL, 5)
-
-        def on_browse(evt):
-            dlg = wx.FileDialog(panel, "选择程序", wildcard="*.exe", style=wx.FD_OPEN)
-            if dlg.ShowModal() == wx.ID_OK:
-                p = dlg.GetPath()
-                path_ctrl.SetValue(p)
-                if not name_ctrl.GetValue():
-                    name_ctrl.SetValue(os.path.basename(p).replace('.exe', ''))
-            dlg.Destroy()
-
-        browse_btn = wx.Button(panel, label="浏览")
-        browse_btn.Bind(wx.EVT_BUTTON, on_browse)
-        path_sizer.Add(browse_btn, 0, wx.ALL, 5)
-        sizer.Add(path_sizer, 0, wx.EXPAND | wx.ALL, 5)
-
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        def on_ok(evt):
-            name = name_ctrl.GetValue().strip()
-            path = path_ctrl.GetValue().strip()
-            if name and path:
-                self.programs.append({'name': name, 'path': path, 'hotkey': ''})
-                save_config(self.programs)
-                self.refresh_list()
-                self.register_hotkeys()
-                dialog.Destroy()
-
-        ok_btn = wx.Button(panel, wx.ID_OK, "添加")
-        ok_btn.Bind(wx.EVT_BUTTON, on_ok)
-        cancel_btn = wx.Button(panel, wx.ID_CANCEL, "取消")
-        cancel_btn.Bind(wx.EVT_BUTTON, lambda e: dialog.Destroy())
-        btn_sizer.Add(ok_btn, 0, wx.ALL, 5)
-        btn_sizer.Add(cancel_btn, 0, wx.ALL, 5)
-        sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 5)
-
-        panel.SetSizer(sizer)
-        dialog.ShowModal()
-        dialog.Destroy()
-
-    def on_add_from_running(self, event):
-        running = []
-        for proc in psutil.process_iter(['exe', 'pid', 'name']):
-            try:
-                exe = proc.info.get('exe')
-                if exe and exe.lower().endswith('.exe'):
-                    exe_name = os.path.basename(exe)
-                    if not any(p['exe'] == exe_name for p in running):
-                        title = get_process_title(proc.info['pid'])
-                        running.append({
-                            'name': exe_name.replace('.exe', ''),
-                            'exe': exe_name,
-                            'path': exe,
-                            'title': title
-                        })
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-
-        if not running:
-            wx.MessageBox("没有找到运行程序", "提示")
-            return
-
-        running.sort(key=lambda x: x['title'] or x['name'])
-
-        dialog = wx.Dialog(self, title="选择程序", size=(560, 420))
-        panel = wx.Panel(dialog)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(wx.StaticText(panel, label="双击选择程序添加:"), 0, wx.ALL, 5)
-
-        listbox = wx.ListBox(panel, size=(-1, 320))
-        for p in running:
-            display = f"{p['title']} - {p['name']}" if p['title'] else p['name']
-            listbox.Append(display)
-        sizer.Add(listbox, 1, wx.EXPAND | wx.ALL, 5)
-
-        def on_double_click(evt):
-            sel = listbox.GetSelection()
-            if sel != wx.NOT_FOUND:
-                self.programs.append({
-                    'name': running[sel]['name'],
-                    'path': running[sel]['path'],
-                    'hotkey': ''
-                })
-                save_config(self.programs)
-                self.refresh_list()
-                self.register_hotkeys()
-                dialog.Destroy()
-
-        listbox.Bind(wx.EVT_LISTBOX_DCLICK, on_double_click)
-        close_btn = wx.Button(panel, wx.ID_CANCEL, "关闭")
-        close_btn.Bind(wx.EVT_BUTTON, lambda e: dialog.Destroy())
-        sizer.Add(close_btn, 0, wx.ALL | wx.ALIGN_CENTER, 6)
-
-        panel.SetSizer(sizer)
-        dialog.ShowModal()
-        dialog.Destroy()
-
-    def on_delete(self, event):
-        selection = self.list_ctrl.GetFirstSelected()
-        if selection >= 0:
-            self.programs.pop(selection)
-            save_config(self.programs)
-            self.refresh_list()
-            self.register_hotkeys()
-
-    def on_set_hotkey(self, event):
-        selection = self.list_ctrl.GetFirstSelected()
-        if selection < 0:
-            wx.MessageBox("请先选择程序", "提示")
-            return
-
-        current_hotkey = self.programs[selection].get('hotkey', '')
-        dlg = wx.TextEntryDialog(
-            self,
-            f"当前快捷键: {current_hotkey}\n\n输入新快捷键（如 f1, alt+1, ctrl+shift+a, win+f2）:",
-            "设置快捷键",
-            current_hotkey
-        )
-
-        if dlg.ShowModal() == wx.ID_OK:
-            hotkey = dlg.GetValue().strip().lower()
-            if hotkey:
-                m, k = parse_hotkey(hotkey)
-                if m is None:
-                    wx.MessageBox("热键格式无效", "错误")
-                else:
-                    self.programs[selection]['hotkey'] = hotkey
-                    save_config(self.programs)
-                    self.refresh_list()
-                    self.register_hotkeys()
-                    wx.MessageBox(f"已设置快捷键: {hotkey}", "成功")
-        dlg.Destroy()
-
-    def on_toggle_startup(self, event):
-        enabled = is_startup_enabled()
-        ok = set_startup(not enabled)
-        if ok:
-            self.update_startup_button()
-            wx.MessageBox("已更新开机启动状态", "提示")
-        else:
-            wx.MessageBox("设置失败，请检查权限", "错误")
-
-    # ---------- 托盘/关闭 ----------
-    def on_close(self, event):
-        if self._really_close:
-            self.unregister_hotkeys()
-            if self.tray:
-                self.tray.RemoveIcon()
-                self.tray.Destroy()
-                self.tray = None
-            event.Skip()
-        else:
-            self.Hide()
-            self.status_text.SetLabel("已最小化到托盘（右下角图标）")
-            event.Veto()
+    # ----- 托盘 -----
+    def hide_to_tray(self):
+        self.Hide()
+        self.update_status("已隐藏到托盘")
 
     def show_from_tray(self):
         self.Show()
         self.Raise()
         self.Iconize(False)
+        self.update_status("窗口已恢复")
 
-    def real_exit(self):
-        self._really_close = True
+    def on_close(self, event):
+        if self.exiting:
+            self.unregister_all_hotkeys()
+            if self.taskbar:
+                self.taskbar.RemoveIcon()
+                self.taskbar.Destroy()
+            event.Skip()
+        else:
+            event.Veto()
+            self.hide_to_tray()
+
+    def exit_app(self):
+        self.exiting = True
         self.Close()
+
+    # ----- 设置 -----
+    def on_apply_settings(self, _):
+        target = self.autostart_cb.GetValue()
+        ok = set_autostart(target)
+        if not ok:
+            wx.MessageBox("开机自启设置失败", "错误", wx.OK | wx.ICON_ERROR)
+            self.autostart_cb.SetValue(is_autostart_enabled())
+            return
+        self.autostart = target
+        self.persist()
+        wx.MessageBox("设置已保存", "成功", wx.OK | wx.ICON_INFORMATION)
+
+    # ----- 热键注册 -----
+    def unregister_all_hotkeys(self):
+        for hid in self.registered_hotkey_ids:
+            try:
+                self.UnregisterHotKey(hid)
+            except Exception:
+                pass
+        self.registered_hotkey_ids.clear()
+        self.hotkey_id_to_index.clear()
+
+    def register_all_hotkeys(self):
+        self.unregister_all_hotkeys()
+
+        used = set()
+        base_id = 1000
+        fail_msgs = []
+
+        for idx, p in enumerate(self.programs):
+            hk = normalize_hotkey(p.get("hotkey", ""))
+            if not hk:
+                continue
+
+            try:
+                mods, vk, normalized = hotkey_to_mod_vk(hk)
+                self.programs[idx]["hotkey"] = normalized
+                hk = normalized
+            except ValueError as e:
+                fail_msgs.append(f'{p.get("name","")}：{hk}（{e}）')
+                continue
+
+            if hk in used:
+                fail_msgs.append(f'{p.get("name","")}：{hk}（重复）')
+                continue
+            used.add(hk)
+
+            hid = base_id + idx
+            if self.RegisterHotKey(hid, mods, vk):
+                self.registered_hotkey_ids.append(hid)
+                self.hotkey_id_to_index[hid] = idx
+                self.Bind(wx.EVT_HOTKEY, self.on_hotkey, id=hid)
+            else:
+                fail_msgs.append(f'{p.get("name","")}：{hk}（注册失败，可能占用）')
+
+        self.persist()
+        self.refresh_list()
+
+        if fail_msgs:
+            wx.MessageBox("以下快捷键注册失败：\n\n" + "\n".join(fail_msgs),
+                          "热键提示", wx.OK | wx.ICON_WARNING)
+
+    def on_hotkey(self, event):
+        idx = self.hotkey_id_to_index.get(event.GetId())
+        if idx is None or idx < 0 or idx >= len(self.programs):
+            return
+        try:
+            p = self.programs[idx]
+            toggle_program(p)
+            self.update_status(f'已切换：{p.get("name","")}')
+        except Exception as e:
+            wx.MessageBox(f"切换失败：{e}", "错误", wx.OK | wx.ICON_ERROR)
+
+    # ----- 列表操作 -----
+    def on_manual_add(self, _):
+        dialog = wx.Dialog(self, title="添加程序", size=(760, 420))
+        panel = wx.Panel(dialog)
+        s = wx.BoxSizer(wx.VERTICAL)
+
+        # 名称
+        r1 = wx.BoxSizer(wx.HORIZONTAL)
+        r1.Add(wx.StaticText(panel, label="程序名称:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        name_ctrl = wx.TextCtrl(panel)
+        r1.Add(name_ctrl, 1, wx.ALL | wx.EXPAND, 5)
+        s.Add(r1, 0, wx.EXPAND)
+
+        # 路径
+        r2 = wx.BoxSizer(wx.HORIZONTAL)
+        r2.Add(wx.StaticText(panel, label="程序路径:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        path_ctrl = wx.TextCtrl(panel)
+        r2.Add(path_ctrl, 1, wx.ALL | wx.EXPAND, 5)
+
+        def on_browse(_evt):
+            fd = wx.FileDialog(panel, "选择程序", wildcard="*.exe", style=wx.FD_OPEN)
+            if fd.ShowModal() == wx.ID_OK:
+                p = fd.GetPath()
+                path_ctrl.SetValue(p)
+                if not name_ctrl.GetValue().strip():
+                    name_ctrl.SetValue(os.path.basename(p).replace(".exe", ""))
+            fd.Destroy()
+
+        btn_browse = wx.Button(panel, label="浏览")
+        btn_browse.Bind(wx.EVT_BUTTON, on_browse)
+        r2.Add(btn_browse, 0, wx.ALL, 5)
+        s.Add(r2, 0, wx.EXPAND)
+
+        # 参数
+        r3 = wx.BoxSizer(wx.HORIZONTAL)
+        r3.Add(wx.StaticText(panel, label="启动参数:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        args_ctrl = wx.TextCtrl(panel)
+        r3.Add(args_ctrl, 1, wx.ALL | wx.EXPAND, 5)
+        s.Add(r3, 0, wx.EXPAND)
+
+        # profile关键词
+        r4 = wx.BoxSizer(wx.HORIZONTAL)
+        r4.Add(wx.StaticText(panel, label="Profile关键词:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        profile_ctrl = wx.TextCtrl(panel)
+        profile_ctrl.SetHint("可选：如 profile 1 / person 2 / --profile-directory=Default")
+        r4.Add(profile_ctrl, 1, wx.ALL | wx.EXPAND, 5)
+        s.Add(r4, 0, wx.EXPAND)
+
+        # 窗口关键词
+        r5 = wx.BoxSizer(wx.HORIZONTAL)
+        r5.Add(wx.StaticText(panel, label="窗口关键词:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        kw_ctrl = wx.TextCtrl(panel)
+        kw_ctrl.SetHint("可选：按窗口标题进一步区分")
+        r5.Add(kw_ctrl, 1, wx.ALL | wx.EXPAND, 5)
+        s.Add(r5, 0, wx.EXPAND)
+
+        btns = wx.BoxSizer(wx.HORIZONTAL)
+
+        def on_ok(_evt):
+            name = name_ctrl.GetValue().strip()
+            path = path_ctrl.GetValue().strip()
+            args = args_ctrl.GetValue().strip()
+            profile_kw = profile_ctrl.GetValue().strip()
+            win_kw = kw_ctrl.GetValue().strip()
+
+            if not name or not path:
+                wx.MessageBox("请填写程序名称和路径", "提示")
+                return
+            if not os.path.exists(path):
+                wx.MessageBox("程序路径不存在", "错误", wx.OK | wx.ICON_ERROR)
+                return
+
+            self.programs.append({
+                "name": name,
+                "path": path,
+                "args": args,
+                "hotkey": "",
+                "profile_keyword": profile_kw,
+                "window_keyword": win_kw
+            })
+            self.persist()
+            self.refresh_list()
+            self.register_all_hotkeys()
+            dialog.Destroy()
+
+        btn_ok = wx.Button(panel, wx.ID_OK, "添加")
+        btn_ok.Bind(wx.EVT_BUTTON, on_ok)
+        btn_cancel = wx.Button(panel, wx.ID_CANCEL, "取消")
+        btn_cancel.Bind(wx.EVT_BUTTON, lambda e: dialog.Destroy())
+
+        btns.Add(btn_ok, 0, wx.ALL, 5)
+        btns.Add(btn_cancel, 0, wx.ALL, 5)
+        s.Add(btns, 0, wx.ALIGN_CENTER | wx.ALL, 8)
+
+        panel.SetSizer(s)
+        dialog.ShowModal()
+        dialog.Destroy()
+
+    def on_delete(self, _):
+        idx = self.list_ctrl.GetFirstSelected()
+        if idx < 0:
+            wx.MessageBox("请先选择一项", "提示")
+            return
+        self.programs.pop(idx)
+        self.persist()
+        self.refresh_list()
+        self.register_all_hotkeys()
+
+    def on_set_hotkey(self, _):
+        idx = self.list_ctrl.GetFirstSelected()
+        if idx < 0:
+            wx.MessageBox("请先选择程序", "提示")
+            return
+
+        dlg = HotkeyCaptureDialog(self, current_hotkey=self.programs[idx].get("hotkey", ""))
+        if dlg.ShowModal() == wx.ID_OK:
+            hk = normalize_hotkey(dlg.captured_hotkey)
+
+            if not hk:
+                self.programs[idx]["hotkey"] = ""
+            else:
+                try:
+                    _, _, hk = hotkey_to_mod_vk(hk)
+                except ValueError as e:
+                    wx.MessageBox(f"快捷键无效：{e}", "错误", wx.OK | wx.ICON_ERROR)
+                    dlg.Destroy()
+                    return
+
+                for i, p in enumerate(self.programs):
+                    if i != idx and normalize_hotkey(p.get("hotkey", "")) == hk:
+                        wx.MessageBox("该快捷键已被其他程序使用", "错误", wx.OK | wx.ICON_ERROR)
+                        dlg.Destroy()
+                        return
+                self.programs[idx]["hotkey"] = hk
+
+            self.persist()
+            self.refresh_list()
+            self.register_all_hotkeys()
+
+        dlg.Destroy()
+
+    def on_set_profile_keyword(self, _):
+        idx = self.list_ctrl.GetFirstSelected()
+        if idx < 0:
+            wx.MessageBox("请先选择程序", "提示")
+            return
+
+        cur = self.programs[idx].get("profile_keyword", "")
+        dlg = wx.TextEntryDialog(
+            self,
+            "输入 Profile关键词（匹配进程命令行 + 窗口标题）\n"
+            "例如：profile 1 / person 2 / default\n"
+            "留空表示不按 profile 区分",
+            "设置 Profile关键词",
+            cur
+        )
+        if dlg.ShowModal() == wx.ID_OK:
+            self.programs[idx]["profile_keyword"] = dlg.GetValue().strip()
+            self.persist()
+            self.refresh_list()
+            wx.MessageBox("Profile关键词已保存", "成功", wx.OK | wx.ICON_INFORMATION)
+        dlg.Destroy()
+
+    def on_set_window_keyword(self, _):
+        idx = self.list_ctrl.GetFirstSelected()
+        if idx < 0:
+            wx.MessageBox("请先选择程序", "提示")
+            return
+
+        cur = self.programs[idx].get("window_keyword", "")
+        dlg = wx.TextEntryDialog(
+            self,
+            "输入窗口关键词（匹配窗口标题）\n留空表示不按标题区分",
+            "设置窗口关键词",
+            cur
+        )
+        if dlg.ShowModal() == wx.ID_OK:
+            self.programs[idx]["window_keyword"] = dlg.GetValue().strip()
+            self.persist()
+            self.refresh_list()
+            wx.MessageBox("窗口关键词已保存", "成功", wx.OK | wx.ICON_INFORMATION)
+        dlg.Destroy()
 
 
 class QuickLauncherApp(wx.App):
@@ -563,6 +830,6 @@ class QuickLauncherApp(wx.App):
         return True
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     app = QuickLauncherApp()
     app.MainLoop()
