@@ -3,6 +3,9 @@ name: Update Version
 on:
   release:
     types: [published]
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   update-version:
@@ -13,7 +16,13 @@ jobs:
 
       - name: Extract version
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: |
+          if [ -n "${{ github.event.release }}" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "VERSION=${VERSION#v}" >> $GITHUB_OUTPUT
 
       - name: Update version in code
         run: |
@@ -26,5 +35,5 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add main/main.py
-          git commit -m "更新版本号 ${{ steps.version.outputs.VERSION }}" || echo "No changes to commit"
+          git commit -m "更新版本号 v${{ steps.version.outputs.VERSION }}" || echo "No changes to commit"
           git push
