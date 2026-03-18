@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-QuickLauncher - 浏览器多用户稳定控制版（含 HWND 失效后自动重绑 + 同浏览器未绑定自动补绑）
+QuickLauncher - 浏览器多用户稳定控制版
+  ★ 新增：严格 cmdline profile 匹配 + 周期自动补绑 + 诊断按钮
 """
 
 import wx
@@ -46,7 +47,14 @@ else:
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
-LAST_ACTIVE_PROFILE_HWND = {}  # key=(exe_lower, profile_lower)->(hwnd, ts)
+LAST_ACTIVE_PROFILE_HWND = {}
+
+
+# ★ 新增辅助函数
+def is_browser_exe(path_or_name):
+    """判断是否为浏览器可执行文件"""
+    name = os.path.basename(path_or_name or "").lower().replace(".exe", "")
+    return name in BROWSER_SET
 
 
 # ---------------------------
@@ -89,24 +97,21 @@ def load_config():
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-
             programs = data.get("programs", [])
             autostart = data.get("autostart", is_autostart_enabled())
-
             for p in programs:
                 p.setdefault("name", "")
                 p.setdefault("path", "")
                 p.setdefault("args", "")
                 p.setdefault("hotkey", "")
                 p.setdefault("window_keyword", "")
-                p.setdefault("match_mode", "title")  # title/profile/hwnd
+                p.setdefault("match_mode", "title")
                 p.setdefault("bind_hwnd", 0)
                 p.setdefault("profile_name", "")
                 p.setdefault("title_sig", "")
             return {"programs": programs, "autostart": autostart}
         except Exception as e:
             print("load_config error:", e)
-
     return default_data
 
 
@@ -126,7 +131,6 @@ def hotkey_to_mod_vk(hotkey: str):
     hotkey = normalize_hotkey(hotkey)
     if not hotkey:
         raise ValueError("快捷键不能为空")
-
     parts = hotkey.split("+")
     if any(p == "" for p in parts):
         raise ValueError("快捷键格式错误")
@@ -170,14 +174,12 @@ def hotkey_to_mod_vk(hotkey: str):
     if mods & MOD_WIN:
         ordered.append("win")
     normalized = "+".join(ordered + [main_key]) if ordered else main_key
-
     return mods, key_map[main_key], normalized
 
 
 def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
     key = event.GetKeyCode()
     main_key = None
-
     if wx.WXK_F1 <= key <= wx.WXK_F12:
         main_key = f"f{key - wx.WXK_F1 + 1}"
     elif ord('0') <= key <= ord('9'):
@@ -188,7 +190,6 @@ def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
         main_key = chr(key).lower()
     else:
         return ""
-
     mods = []
     if event.ControlDown():
         mods.append("ctrl")
@@ -198,10 +199,8 @@ def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
         mods.append("alt")
     if event.MetaDown():
         mods.append("win")
-
     if not mods and not main_key.startswith("f"):
         return ""
-
     return "+".join(mods + [main_key]) if mods else main_key
 
 
@@ -256,6 +255,7 @@ def get_proc_path_name_cmdline(pid):
         return "", "", []
 
 
+# ★ 改进：无 --profile-directory 的主进程推断为 "Default"
 def parse_profile_from_cmdline(proc_name: str, cmdline_list):
     name = (proc_name or "").lower().replace(".exe", "")
     args = cmdline_list or []
@@ -273,6 +273,10 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
         v = value_after("--profile-directory")
         if v:
             return v
+        # ★ 主浏览器进程（无 --type=）且没写 --profile-directory → Default
+        has_type_flag = any(a.lower().startswith("--type=") for a in args)
+        if not has_type_flag and len(args) >= 1:
+            return "Default"
         u = value_after("--user-data-dir")
         if u:
             return os.path.basename(u.rstrip("\\/"))
@@ -294,16 +298,9 @@ def parse_profile_from_title(proc_name: str, title: str):
     t = (title or "").strip()
     if not t:
         return ""
-
     m = re.search(r"\b(Profile\s*\d+|Default|Personal|Work|Guest)\b", t, re.IGNORECASE)
     if m:
         return m.group(1).strip()
-
-    if name == "firefox":
-        m2 = re.search(r"\b(Profile\s*\d+|Default)\b", t, re.IGNORECASE)
-        if m2:
-            return m2.group(1).strip()
-
     return ""
 
 
@@ -335,12 +332,10 @@ def enum_visible_app_windows():
                 return True
             if not is_alt_tab_window(hwnd):
                 return True
-
             pid = get_pid_from_hwnd(hwnd)
             title = get_window_title(hwnd).strip()
             path, proc_name, cmdline = get_proc_path_name_cmdline(pid)
             profile = guess_profile(proc_name, cmdline, title)
-
             windows.append({
                 "hwnd": int(hwnd),
                 "pid": int(pid),
@@ -362,20 +357,17 @@ def enum_visible_app_windows():
 def enum_windows_for_program(path):
     target = os.path.normcase(path or "")
     result = []
-
     all_ws = enum_visible_app_windows()
     for w in all_ws:
         wpath = os.path.normcase(w.get("path", "") or "")
         if wpath and target and wpath == target:
             result.append(w)
-
     if not result and path:
         exe_name = os.path.basename(path).lower().replace(".exe", "")
         for w in all_ws:
             pn = (w.get("proc_name", "") or "").lower().replace(".exe", "")
             if pn == exe_name:
                 result.append(w)
-
     return result
 
 
@@ -388,7 +380,6 @@ def update_last_active_cache():
         path, proc_name, cmdline = get_proc_path_name_cmdline(pid)
         title = get_window_title(hwnd).strip()
         profile = guess_profile(proc_name, cmdline, title)
-
         exe = (os.path.basename(path) if path else proc_name or "").lower().replace(".exe", "")
         if exe in BROWSER_SET and profile:
             LAST_ACTIVE_PROFILE_HWND[(exe, profile.strip().lower())] = (int(hwnd), time.time())
@@ -408,28 +399,43 @@ def build_profile_args(proc_name: str, profile: str):
     return ""
 
 
+# ★ 重写打分函数 —— 浏览器严格 profile 匹配
 def score_window_for_program(program, w):
     score = 0
     keyword = (program.get("window_keyword", "") or "").strip().lower()
     profile_name = (program.get("profile_name", "") or "").strip().lower()
     title_sig = (program.get("title_sig", "") or "").strip().lower()
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
+    path = program.get("path", "")
 
     w_title = (w.get("title", "") or "").lower()
     w_sig = (w.get("title_sig", "") or "").lower()
     w_prof = (w.get("profile", "") or "").strip().lower()
 
-    if keyword and w_prof:
-        if w_prof == keyword:
-            score += 120
-        elif keyword in w_prof:
-            score += 90
+    is_browser = is_browser_exe(path)
 
-    if profile_name and w_prof:
-        if w_prof == profile_name:
-            score += 100
-        elif profile_name in w_prof:
-            score += 70
+    # ★ 浏览器 + 有 profile_name → 严格比对 cmdline --profile-directory
+    if is_browser and profile_name:
+        if w_prof:
+            if w_prof == profile_name:
+                score += 500          # 精确命中，权重碾压其它因素
+            else:
+                return -9999          # profile 不同 → 直接排除
+        else:
+            score -= 100              # 窗口未检测到 profile → 大幅降权
+
+    # ★ 非浏览器的常规匹配（保持原逻辑）
+    if not (is_browser and profile_name):
+        if keyword and w_prof:
+            if w_prof == keyword:
+                score += 120
+            elif keyword in w_prof:
+                score += 90
+        if profile_name and w_prof:
+            if w_prof == profile_name:
+                score += 100
+            elif profile_name in w_prof:
+                score += 70
 
     if title_sig and w_sig:
         if w_sig == title_sig:
@@ -458,19 +464,14 @@ def find_window_for_program(program):
         return None
 
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
-    keyword = (program.get("window_keyword", "") or "").strip().lower()
     bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
-    title_sig = (program.get("title_sig", "") or "").strip().lower()
-    profile_name = (program.get("profile_name", "") or "").strip().lower()
 
-    # 1) hwnd 直接命中：已绑定且有效则优先返回（不改绑定）
     if match_mode == "hwnd" and bind_hwnd and is_hwnd_valid(bind_hwnd):
         pid = get_pid_from_hwnd(bind_hwnd)
         ppath, _, _ = get_proc_path_name_cmdline(pid)
         if os.path.normcase(ppath or "") == os.path.normcase(path or ""):
             return bind_hwnd
 
-    # 2) 否则走候选
     candidates = enum_windows_for_program(path)
     if not candidates:
         return None
@@ -482,6 +483,10 @@ def find_window_for_program(program):
 
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best_hwnd, _ = scored[0]
+
+    keyword = (program.get("window_keyword", "") or "").strip()
+    profile_name = (program.get("profile_name", "") or "").strip()
+    title_sig = (program.get("title_sig", "") or "").strip()
 
     if (keyword or profile_name or title_sig) and best_score <= 0:
         return None
@@ -510,7 +515,6 @@ def toggle_program(program):
         if not os.path.exists(path):
             wx.MessageBox(f"程序不存在：\n{path}", "错误", wx.OK | wx.ICON_ERROR)
             return None, False
-
         cmd = [path]
         if args.strip():
             try:
@@ -524,7 +528,8 @@ def toggle_program(program):
 def ask_profile_input(parent, default_profile=""):
     dlg = wx.TextEntryDialog(
         parent,
-        "请输入浏览器 Profile（如 Profile 1 / Default / Work）",
+        "请输入浏览器 Profile（如 Profile 1 / Default / Work）\n"
+        "这个值必须与 Chrome 命令行的 --profile-directory 完全一致！",
         "确认 Profile",
         value=default_profile or ""
     )
@@ -541,20 +546,17 @@ class HotkeyCaptureDialog(wx.Dialog):
     def __init__(self, parent, current_hotkey=""):
         super().__init__(parent, title="设置快捷键", size=(460, 220))
         self.captured_hotkey = normalize_hotkey(current_hotkey)
-
         panel = wx.Panel(self)
         s = wx.BoxSizer(wx.VERTICAL)
         s.Add(wx.StaticText(panel, label="直接按组合键（Esc取消，Backspace清空）"), 0, wx.ALL, 10)
         self.show = wx.TextCtrl(panel, value=self.captured_hotkey, style=wx.TE_READONLY)
         s.Add(self.show, 0, wx.ALL | wx.EXPAND, 10)
-
         row = wx.BoxSizer(wx.HORIZONTAL)
         row.Add(wx.Button(panel, wx.ID_OK, "确定"), 0, wx.ALL, 5)
         row.Add(wx.Button(panel, wx.ID_CANCEL, "取消"), 0, wx.ALL, 5)
         clear = wx.Button(panel, wx.ID_ANY, "清空")
         row.Add(clear, 0, wx.ALL, 5)
         s.Add(row, 0, wx.ALIGN_CENTER)
-
         panel.SetSizer(s)
         self.Bind(wx.EVT_CHAR_HOOK, self.on_char)
         clear.Bind(wx.EVT_BUTTON, self.on_clear)
@@ -571,7 +573,6 @@ class HotkeyCaptureDialog(wx.Dialog):
         if key in (wx.WXK_BACK, wx.WXK_DELETE):
             self.on_clear(None)
             return
-
         hk = wx_event_to_hotkey(event)
         if not hk:
             wx.Bell()
@@ -619,6 +620,7 @@ class QuickLauncherFrame(wx.Frame):
         self.hotkey_id_to_index = {}
         self.registered_hotkey_ids = []
         self.exiting = False
+        self._bind_tick = 0  # ★ 周期补绑计数器
 
         self.init_ui()
         self.Centre()
@@ -635,6 +637,32 @@ class QuickLauncherFrame(wx.Frame):
 
     def on_timer(self, _):
         update_last_active_cache()
+        # ★ 每 ~5 秒自动补绑一次未绑定的浏览器条目
+        self._bind_tick += 1
+        if self._bind_tick % 4 == 0:
+            self.periodic_auto_bind()
+
+    # ★ 新增：周期自动补绑
+    def periodic_auto_bind(self):
+        changed = False
+        for i, p in enumerate(self.programs):
+            if (p.get("match_mode", "title") or "title").lower() != "hwnd":
+                continue
+            path = p.get("path", "")
+            if not path:
+                continue
+            h = int(p.get("bind_hwnd", 0) or 0)
+            if h and is_hwnd_valid(h):
+                # 再验证路径
+                pid = get_pid_from_hwnd(h)
+                cpath, _, _ = get_proc_path_name_cmdline(pid)
+                if os.path.normcase(cpath or "") == os.path.normcase(path or ""):
+                    continue  # 已绑定且有效
+            if self.auto_bind_program_if_needed(i, save=False):
+                changed = True
+        if changed:
+            self.persist()
+            self.refresh_list()
 
     def init_ui(self):
         panel = wx.Panel(self)
@@ -644,10 +672,10 @@ class QuickLauncherFrame(wx.Frame):
         self.list_ctrl.InsertColumn(0, "名称", width=120)
         self.list_ctrl.InsertColumn(1, "快捷键", width=120)
         self.list_ctrl.InsertColumn(2, "模式", width=80)
-        self.list_ctrl.InsertColumn(3, "关键词", width=160)
+        self.list_ctrl.InsertColumn(3, "关键词", width=140)
         self.list_ctrl.InsertColumn(4, "HWND", width=90)
         self.list_ctrl.InsertColumn(5, "Profile", width=100)
-        self.list_ctrl.InsertColumn(6, "TitleSig", width=180)
+        self.list_ctrl.InsertColumn(6, "TitleSig", width=160)
         self.list_ctrl.InsertColumn(7, "路径", width=240)
         root.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
 
@@ -658,6 +686,7 @@ class QuickLauncherFrame(wx.Frame):
             ("删除", self.on_delete),
             ("设置快捷键", self.on_set_hotkey),
             ("设置匹配", self.on_set_match),
+            ("诊断 Profile", self.on_diagnose_profiles),  # ★ 新增
             ("最小化到托盘", lambda e: self.hide_to_tray()),
         ]:
             b = wx.Button(panel, label=label)
@@ -676,7 +705,6 @@ class QuickLauncherFrame(wx.Frame):
 
         self.status = wx.StaticText(panel, label="就绪")
         root.Add(self.status, 0, wx.ALL | wx.ALIGN_CENTER, 6)
-
         panel.SetSizer(root)
 
     def persist(self):
@@ -733,6 +761,42 @@ class QuickLauncherFrame(wx.Frame):
         self.persist()
         wx.MessageBox("设置已保存", "成功")
 
+    # ---- ★ 诊断 Profile 按钮 ----
+    def on_diagnose_profiles(self, _):
+        """列出所有浏览器窗口的 PID / cmdline profile / 标题，方便排查"""
+        all_ws = enum_visible_app_windows()
+        browser_ws = [w for w in all_ws if is_browser_exe(w.get("path", "") or w.get("proc_name", ""))]
+
+        if not browser_ws:
+            wx.MessageBox("当前没有检测到运行中的浏览器窗口。", "诊断结果")
+            return
+
+        lines = []
+        for w in browser_ws:
+            cmdline_short = " ".join(w.get("cmdline", [])[:6])
+            if len(cmdline_short) > 200:
+                cmdline_short = cmdline_short[:200] + "..."
+            lines.append(
+                f"HWND={w['hwnd']}  PID={w['pid']}\n"
+                f"  程序: {w.get('proc_name', '')}\n"
+                f"  Profile(cmdline): {w.get('profile', '') or '(未检测到)'}\n"
+                f"  标题: {w.get('title', '')[:80]}\n"
+                f"  cmdline: {cmdline_short}\n"
+            )
+
+        dlg = wx.Dialog(self, title="浏览器 Profile 诊断", size=(800, 500))
+        panel = wx.Panel(dlg)
+        s = wx.BoxSizer(wx.VERTICAL)
+        s.Add(wx.StaticText(panel, label="以下是所有浏览器窗口的 Profile 检测结果："), 0, wx.ALL, 8)
+        tc = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
+        tc.SetValue("\n".join(lines))
+        s.Add(tc, 1, wx.ALL | wx.EXPAND, 8)
+        btn = wx.Button(panel, wx.ID_OK, "关闭")
+        s.Add(btn, 0, wx.ALL | wx.ALIGN_CENTER, 8)
+        panel.SetSizer(s)
+        dlg.ShowModal()
+        dlg.Destroy()
+
     # ---- 自动补绑逻辑 ----
     def get_used_hwnds_by_same_path(self, path, exclude_index=None):
         used = set()
@@ -749,7 +813,6 @@ class QuickLauncherFrame(wx.Frame):
         return used
 
     def auto_bind_program_if_needed(self, idx, windows_cache=None, save=False):
-        """仅在未绑定或已失效时才绑定；已绑定且有效不改。返回是否发生绑定变更。"""
         if idx < 0 or idx >= len(self.programs):
             return False
         p = self.programs[idx]
@@ -761,7 +824,7 @@ class QuickLauncherFrame(wx.Frame):
         if not path:
             return False
 
-        # 已绑定且有效：不再绑定覆盖
+        # 已绑定且有效 → 不覆盖
         if current and is_hwnd_valid(current):
             pid = get_pid_from_hwnd(current)
             cpath, _, _ = get_proc_path_name_cmdline(pid)
@@ -801,18 +864,15 @@ class QuickLauncherFrame(wx.Frame):
         return True
 
     def auto_bind_unbound_same_browser(self, base_index):
-        """给同 path 的 hwnd 模式项进行批量补绑（仅补未绑定/失效的）"""
         if base_index < 0 or base_index >= len(self.programs):
             return 0
         base = self.programs[base_index]
         path = base.get("path", "")
         if not path:
             return 0
-
         cands = enum_windows_for_program(path)
         if not cands:
             return 0
-
         changed = 0
         for i, p in enumerate(self.programs):
             if os.path.normcase(p.get("path", "") or "") != os.path.normcase(path or ""):
@@ -821,7 +881,6 @@ class QuickLauncherFrame(wx.Frame):
                 continue
             if self.auto_bind_program_if_needed(i, windows_cache=cands, save=False):
                 changed += 1
-
         if changed:
             self.persist()
             self.refresh_list()
@@ -842,7 +901,6 @@ class QuickLauncherFrame(wx.Frame):
         used = set()
         fail = []
         base_id = 1000
-
         for idx, p in enumerate(self.programs):
             hk = normalize_hotkey(p.get("hotkey", ""))
             if not hk:
@@ -853,12 +911,10 @@ class QuickLauncherFrame(wx.Frame):
             except Exception as e:
                 fail.append(f"{p.get('name', '')}：{hk} ({e})")
                 continue
-
             if n in used:
                 fail.append(f"{p.get('name', '')}：{n}（重复）")
                 continue
             used.add(n)
-
             hotkey_id = base_id + idx
             if self.RegisterHotKey(hotkey_id, mods, vk):
                 self.registered_hotkey_ids.append(hotkey_id)
@@ -866,7 +922,6 @@ class QuickLauncherFrame(wx.Frame):
                 self.Bind(wx.EVT_HOTKEY, self.on_hotkey, id=hotkey_id)
             else:
                 fail.append(f"{p.get('name', '')}：{n}（被占用）")
-
         self.persist()
         self.refresh_list()
         if fail:
@@ -881,7 +936,6 @@ class QuickLauncherFrame(wx.Frame):
         mode = (p.get("match_mode", "title") or "title").lower()
         old_hwnd = int(p.get("bind_hwnd", 0) or 0)
 
-        # 先补一次当前项绑定（仅未绑定/失效时）
         if mode == "hwnd":
             self.auto_bind_program_if_needed(idx, save=True)
             old_hwnd = int(p.get("bind_hwnd", 0) or 0)
@@ -891,7 +945,6 @@ class QuickLauncherFrame(wx.Frame):
         changed = False
 
         if mode == "hwnd":
-            # 已绑定且有效 -> 不覆盖
             keep_old = False
             if old_hwnd and is_hwnd_valid(old_hwnd):
                 pid = get_pid_from_hwnd(old_hwnd)
@@ -899,13 +952,11 @@ class QuickLauncherFrame(wx.Frame):
                 if os.path.normcase(cpath or "") == os.path.normcase(p.get("path", "") or ""):
                     keep_old = True
 
-            # 仅在旧绑定无效时，才接收新 hwnd 作为重绑
             if hwnd and not keep_old and hwnd != old_hwnd:
                 p["bind_hwnd"] = int(hwnd)
                 p["title_sig"] = make_title_signature(get_window_title(hwnd))
                 changed = True
 
-            # 自动给同浏览器未绑定/失效项补绑
             auto_cnt = self.auto_bind_unbound_same_browser(idx)
             if auto_cnt > 0:
                 changed = True
@@ -964,7 +1015,6 @@ class QuickLauncherFrame(wx.Frame):
         btns.AddButton(cb)
         btns.Realize()
         s.Add(btns, 0, wx.ALL | wx.ALIGN_CENTER, 8)
-
         panel.SetSizer(s)
 
         if dlg.ShowModal() == wx.ID_OK:
@@ -975,8 +1025,8 @@ class QuickLauncherFrame(wx.Frame):
                 "hotkey": "",
                 "window_keyword": kw.GetValue().strip(),
                 "match_mode": mode.GetStringSelection() or "title",
-                "bind_hwnd": int(hwnd.GetValue().strip() or "0") if (hwnd.GetValue().strip().isdigit()) else 0,
-                "profile_name": kw.GetValue().strip() if (mode.GetStringSelection() == "profile") else "",
+                "bind_hwnd": int(hwnd.GetValue().strip() or "0") if hwnd.GetValue().strip().isdigit() else 0,
+                "profile_name": kw.GetValue().strip() if mode.GetStringSelection() == "profile" else "",
                 "title_sig": ""
             }
             if not p["name"] or not p["path"]:
@@ -988,7 +1038,6 @@ class QuickLauncherFrame(wx.Frame):
                 self.persist()
                 self.refresh_list()
                 self.register_all_hotkeys()
-
         dlg.Destroy()
 
     def on_add_from_running(self, _):
@@ -1003,16 +1052,16 @@ class QuickLauncherFrame(wx.Frame):
         dlg = wx.Dialog(self, title="从运行窗口添加", size=(1020, 520))
         panel = wx.Panel(dlg)
         s = wx.BoxSizer(wx.VERTICAL)
-
-        tip = wx.StaticText(panel, label="双击添加：浏览器默认用 hwnd 模式 + 自动重绑")
+        tip = wx.StaticText(panel, label="双击添加：浏览器默认用 hwnd 模式 + 严格 Profile 匹配")
         s.Add(tip, 0, wx.ALL, 8)
 
         lc = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        lc.InsertColumn(0, "标题", width=330)
-        lc.InsertColumn(1, "程序", width=110)
-        lc.InsertColumn(2, "Profile", width=120)
-        lc.InsertColumn(3, "HWND", width=90)
-        lc.InsertColumn(4, "路径", width=330)
+        lc.InsertColumn(0, "标题", width=280)
+        lc.InsertColumn(1, "程序", width=100)
+        lc.InsertColumn(2, "Profile(cmdline)", width=130)   # ★ 改名更清晰
+        lc.InsertColumn(3, "PID", width=70)                 # ★ 新增
+        lc.InsertColumn(4, "HWND", width=90)
+        lc.InsertColumn(5, "路径", width=300)
 
         rows = []
         for w in ws:
@@ -1025,14 +1074,16 @@ class QuickLauncherFrame(wx.Frame):
                 "profile": w.get("profile", ""),
                 "proc_name": w.get("proc_name", ""),
                 "hwnd": int(w.get("hwnd", 0)),
+                "pid": int(w.get("pid", 0)),
                 "title_sig": w.get("title_sig", "")
             }
             rows.append(row)
-            i = lc.InsertItem(lc.GetItemCount(), row["title"] or "(无标题)")
+            i = lc.InsertItem(lc.GetItemCount(), row["title"][:80] or "(无标题)")
             lc.SetItem(i, 1, row["name"])
-            lc.SetItem(i, 2, row["profile"])
-            lc.SetItem(i, 3, str(row["hwnd"]))
-            lc.SetItem(i, 4, row["path"])
+            lc.SetItem(i, 2, row["profile"] or "(无)")
+            lc.SetItem(i, 3, str(row["pid"]))
+            lc.SetItem(i, 4, str(row["hwnd"]))
+            lc.SetItem(i, 5, row["path"])
 
         def on_dbl(_e):
             i = lc.GetFirstSelected()
@@ -1075,7 +1126,6 @@ class QuickLauncherFrame(wx.Frame):
         close_btn = wx.Button(panel, wx.ID_CANCEL, "关闭")
         close_btn.Bind(wx.EVT_BUTTON, lambda e: dlg.Destroy())
         s.Add(close_btn, 0, wx.ALL | wx.ALIGN_CENTER, 6)
-
         panel.SetSizer(s)
         dlg.ShowModal()
         dlg.Destroy()
@@ -1095,7 +1145,6 @@ class QuickLauncherFrame(wx.Frame):
         if idx < 0:
             wx.MessageBox("请先选择程序", "提示")
             return
-
         dlg = HotkeyCaptureDialog(self, self.programs[idx].get("hotkey", ""))
         if dlg.ShowModal() == wx.ID_OK:
             hk = normalize_hotkey(dlg.captured_hotkey)
@@ -1108,14 +1157,12 @@ class QuickLauncherFrame(wx.Frame):
                     wx.MessageBox(f"快捷键无效: {e}", "错误")
                     dlg.Destroy()
                     return
-
                 for i, p in enumerate(self.programs):
                     if i != idx and normalize_hotkey(p.get("hotkey", "")) == n:
                         wx.MessageBox("快捷键重复", "错误")
                         dlg.Destroy()
                         return
                 self.programs[idx]["hotkey"] = n
-
             self.persist()
             self.refresh_list()
             self.register_all_hotkeys()
@@ -1126,7 +1173,6 @@ class QuickLauncherFrame(wx.Frame):
         if idx < 0:
             wx.MessageBox("请先选择程序", "提示")
             return
-
         p = self.programs[idx]
         dlg = wx.Dialog(self, title="设置匹配", size=(560, 300))
         panel = wx.Panel(dlg)
@@ -1145,8 +1191,9 @@ class QuickLauncherFrame(wx.Frame):
             r.Add(ctrl, 1, wx.ALL | wx.EXPAND, 6)
             s.Add(r, 0, wx.EXPAND)
 
-        tip = wx.StaticText(panel, label="建议浏览器：mode=hwnd，profile_name填写对应Profile，TitleSig保留自动值")
-        tip.SetForegroundColour(wx.Colour(100, 100, 100))
+        tip = wx.StaticText(panel,
+            label="★ 浏览器请确保 Profile名 与 --profile-directory 完全一致（如 Default / Profile 1 / Profile 2）")
+        tip.SetForegroundColour(wx.Colour(200, 50, 50))
         s.Add(tip, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         btns = wx.StdDialogButtonSizer()
@@ -1156,7 +1203,6 @@ class QuickLauncherFrame(wx.Frame):
         btns.AddButton(cb)
         btns.Realize()
         s.Add(btns, 0, wx.ALL | wx.ALIGN_CENTER, 8)
-
         panel.SetSizer(s)
 
         if dlg.ShowModal() == wx.ID_OK:
@@ -1171,7 +1217,6 @@ class QuickLauncherFrame(wx.Frame):
             self.persist()
             self.refresh_list()
             wx.MessageBox("已保存", "成功")
-
         dlg.Destroy()
 
 
