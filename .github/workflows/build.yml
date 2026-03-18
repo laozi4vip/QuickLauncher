@@ -1,0 +1,59 @@
+name: Build EXE
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          if (Test-Path requirements.txt) {
+            python -m pip install -r requirements.txt
+          }
+          python -m pip install pyinstaller pywin32 psutil wxpython
+
+      - name: Build EXE
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed `
+            --collect-all wx `
+            --collect-all psutil `
+            --name QuickLauncher `
+            main/main.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickLauncher
+          path: dist/QuickLauncher.exe
+          if-no-files-found: error
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          files: dist/QuickLauncher.exe
+          draft: false
+          prerelease: false
+          generate_release_notes: true
