@@ -8,7 +8,7 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 __author__ = "laozi4vip"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
 __app_name__ = "QuickLauncher"
-__version__ = "2.2"
+__version__ = "2.3"
 __description__ = "Windows 任务栏快捷启动器"
 
 import wx
@@ -113,7 +113,7 @@ def load_config():
                 p.setdefault("bind_hwnd", 0)
                 p.setdefault("profile_name", "")
                 p.setdefault("title_sig", "")
-                p.setdefault("browser_fallback_exe", False)  # 新增：浏览器类兜底启动开关
+                p.setdefault("browser_fallback_exe", False)
             return {"programs": programs, "autostart": autostart}
         except Exception as e:
             print("load_config error:", e)
@@ -563,16 +563,71 @@ def find_window_for_program(program):
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best_hwnd, _ = scored[0]
 
-    # 浏览器类：默认必须有正向匹配分数
     if is_browser_program(program):
         if best_score <= 0:
             return None
         return best_hwnd
 
-    # 非浏览器类：保留原有逻辑
     if (keyword or profile_name or title_sig) and best_score <= 0:
         return None
     return best_hwnd
+
+
+# ---------------------------
+# 新增：浏览器同 Profile 组窗口查找 & 批量切换
+# ---------------------------
+def find_browser_group_windows(program):
+    """
+    返回同一程序(path)下、与 program 匹配条件一致的一组浏览器窗口 hwnd 列表（按分数降序）
+    """
+    path = program.get("path", "")
+    if not path:
+        return []
+
+    cands = enum_windows_for_program(path)
+    if not cands:
+        return []
+
+    scored = []
+    for w in cands:
+        hwnd = int(w.get("hwnd", 0) or 0)
+        if not hwnd or not is_hwnd_valid(hwnd):
+            continue
+        s = score_window_for_program(program, w)
+        # 浏览器组只接受有正向匹配的窗口（确保是同 profile/同规则）
+        if s > 0:
+            scored.append((s, hwnd))
+
+    if not scored:
+        return []
+
+    # 去重并排序
+    scored.sort(key=lambda x: x[0], reverse=True)
+    seen = set()
+    result = []
+    for _, h in scored:
+        if h not in seen:
+            seen.add(h)
+            result.append(h)
+    return result
+
+
+def minimize_windows(hwnds):
+    for h in hwnds:
+        try:
+            if is_hwnd_valid(h):
+                user32.ShowWindow(h, SW_MINIMIZE)
+        except Exception:
+            pass
+
+
+def restore_windows(hwnds):
+    for h in hwnds:
+        try:
+            if is_hwnd_valid(h) and user32.IsIconic(h):
+                user32.ShowWindow(h, SW_RESTORE)
+        except Exception:
+            pass
 
 
 def launch_program_by_path(path, args):
@@ -600,6 +655,32 @@ def toggle_program(program):
     if not path:
         return None, False
 
+    # 浏览器：优先按“同 Profile 组”进行批量切换
+    if is_browser_program(program):
+        group_hwnds = find_browser_group_windows(program)
+        if group_hwnds:
+            fg = user32.GetForegroundWindow()
+
+            # 若当前焦点在组内：整组最小化
+            if fg in group_hwnds:
+                minimize_windows(group_hwnds)
+                return group_hwnds[0], True
+
+            # 否则：整组恢复并激活第一候选
+            restore_windows(group_hwnds)
+            try:
+                user32.SetForegroundWindow(group_hwnds[0])
+            except Exception:
+                pass
+            return group_hwnds[0], True
+
+        # 找不到匹配窗口 -> 按兜底策略
+        if browser_fallback_enabled(program):
+            ok = launch_program_by_path(path, args)
+            return None, ok
+        return None, False
+
+    # 非浏览器：保持原行为（单窗口）
     hwnd = find_window_for_program(program)
     if hwnd:
         fg = user32.GetForegroundWindow()
@@ -611,15 +692,6 @@ def toggle_program(program):
             user32.SetForegroundWindow(hwnd)
         return hwnd, True
 
-    # 找不到匹配窗口
-    if is_browser_program(program):
-        # 浏览器类：可选 EXE 兜底
-        if browser_fallback_enabled(program):
-            ok = launch_program_by_path(path, args)
-            return None, ok
-        return None, False
-
-    # 非浏览器类：按路径启动
     ok = launch_program_by_path(path, args)
     return None, ok
 
@@ -1080,7 +1152,6 @@ class QuickLauncherFrame(wx.Frame):
 
         hwnd, acted = toggle_program(p)
 
-        # 浏览器类：没匹配且未启动（未执行动作）则直接忽略
         if is_browser_program(p) and not acted:
             return
 
