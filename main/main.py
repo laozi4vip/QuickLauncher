@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 QuickLauncher - 浏览器多用户稳定控制版
-  ★ 新增：严格 cmdline profile 匹配 + 周期自动补绑 + 诊断按钮
+★ 修复：Chrome 重启后 Profile 通过进程树回溯正确重绑
 """
 
 import wx
@@ -49,12 +49,9 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 LAST_ACTIVE_PROFILE_HWND = {}
 
-
-# ★ 新增辅助函数
-def is_browser_exe(path_or_name):
-    """判断是否为浏览器可执行文件"""
-    name = os.path.basename(path_or_name or "").lower().replace(".exe", "")
-    return name in BROWSER_SET
+# ★ 浏览器主进程映射缓存
+_browser_main_map_cache = {}
+_browser_main_map_ts = 0.0
 
 
 # ---------------------------
@@ -255,7 +252,6 @@ def get_proc_path_name_cmdline(pid):
         return "", "", []
 
 
-# ★ 改进：无 --profile-directory 的主进程推断为 "Default"
 def parse_profile_from_cmdline(proc_name: str, cmdline_list):
     name = (proc_name or "").lower().replace(".exe", "")
     args = cmdline_list or []
@@ -273,10 +269,6 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
         v = value_after("--profile-directory")
         if v:
             return v
-        # ★ 主浏览器进程（无 --type=）且没写 --profile-directory → Default
-        has_type_flag = any(a.lower().startswith("--type=") for a in args)
-        if not has_type_flag and len(args) >= 1:
-            return "Default"
         u = value_after("--user-data-dir")
         if u:
             return os.path.basename(u.rstrip("\\/"))
@@ -301,6 +293,10 @@ def parse_profile_from_title(proc_name: str, title: str):
     m = re.search(r"\b(Profile\s*\d+|Default|Personal|Work|Guest)\b", t, re.IGNORECASE)
     if m:
         return m.group(1).strip()
+    if name == "firefox":
+        m2 = re.search(r"\b(Profile\s*\d+|Default)\b", t, re.IGNORECASE)
+        if m2:
+            return m2.group(1).strip()
     return ""
 
 
@@ -322,8 +318,81 @@ def make_title_signature(title: str):
     return t[:120]
 
 
+# ---------------------------
+# ★ 浏览器主进程扫描 & 进程树回溯
+# ---------------------------
+def build_browser_main_proc_map():
+    """
+    扫描所有浏览器进程，找出主进程（命令行不含 --type= 的）。
+    返回 {pid: profile_directory}
+    无显式 --profile-directory 的主进程视为 "Default"。
+    """
+    main_map = {}
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            pname = (proc.name() or "").lower().replace(".exe", "")
+            if pname not in BROWSER_SET:
+                continue
+            try:
+                cmdline = proc.cmdline()
+            except (psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            # 主浏览器进程不含 --type= 参数
+            if any(a.lower().startswith('--type=') for a in cmdline):
+                continue
+            profile = parse_profile_from_cmdline(proc.name(), cmdline)
+            if not profile:
+                profile = "Default"
+            main_map[proc.pid] = profile
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return main_map
+
+
+def get_cached_browser_main_map(max_age=3.0):
+    """带缓存的浏览器主进程映射（避免高频调用时重复扫描）"""
+    global _browser_main_map_cache, _browser_main_map_ts
+    now = time.time()
+    if now - _browser_main_map_ts < max_age and _browser_main_map_cache:
+        return _browser_main_map_cache
+    _browser_main_map_cache = build_browser_main_proc_map()
+    _browser_main_map_ts = now
+    return _browser_main_map_cache
+
+
+def get_profile_by_pid_tree(pid, main_map):
+    """
+    从窗口的 PID 向上遍历进程树，找到它属于哪个主浏览器进程，返回 profile。
+    """
+    if pid in main_map:
+        return main_map[pid]
+    try:
+        visited = {pid}
+        current = psutil.Process(pid)
+        for _ in range(15):
+            try:
+                parent = current.parent()
+                if parent is None or parent.pid == 0 or parent.pid in visited:
+                    break
+                visited.add(parent.pid)
+                if parent.pid in main_map:
+                    return main_map[parent.pid]
+                current = parent
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                break
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    return ""
+
+
+# ---------------------------
+# 窗口枚举（★ 使用进程树回溯检测 Profile）
+# ---------------------------
 def enum_visible_app_windows():
     windows = []
+
+    # ★ 预先构建浏览器主进程映射
+    browser_main_map = get_cached_browser_main_map(max_age=2.0)
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def callback(hwnd, _):
@@ -332,10 +401,20 @@ def enum_visible_app_windows():
                 return True
             if not is_alt_tab_window(hwnd):
                 return True
+
             pid = get_pid_from_hwnd(hwnd)
             title = get_window_title(hwnd).strip()
             path, proc_name, cmdline = get_proc_path_name_cmdline(pid)
-            profile = guess_profile(proc_name, cmdline, title)
+
+            pn = (proc_name or "").lower().replace(".exe", "")
+            if pn in BROWSER_SET:
+                # ★ 优先通过进程树回溯获取 profile
+                profile = get_profile_by_pid_tree(pid, browser_main_map)
+                if not profile:
+                    profile = guess_profile(proc_name, cmdline, title)
+            else:
+                profile = guess_profile(proc_name, cmdline, title)
+
             windows.append({
                 "hwnd": int(hwnd),
                 "pid": int(pid),
@@ -379,10 +458,16 @@ def update_last_active_cache():
         pid = get_pid_from_hwnd(hwnd)
         path, proc_name, cmdline = get_proc_path_name_cmdline(pid)
         title = get_window_title(hwnd).strip()
-        profile = guess_profile(proc_name, cmdline, title)
+
         exe = (os.path.basename(path) if path else proc_name or "").lower().replace(".exe", "")
-        if exe in BROWSER_SET and profile:
-            LAST_ACTIVE_PROFILE_HWND[(exe, profile.strip().lower())] = (int(hwnd), time.time())
+        if exe in BROWSER_SET:
+            # ★ 用进程树回溯获取 profile
+            browser_main_map = get_cached_browser_main_map(max_age=5.0)
+            profile = get_profile_by_pid_tree(pid, browser_main_map)
+            if not profile:
+                profile = guess_profile(proc_name, cmdline, title)
+            if profile:
+                LAST_ACTIVE_PROFILE_HWND[(exe, profile.strip().lower())] = (int(hwnd), time.time())
     except Exception:
         pass
 
@@ -399,43 +484,28 @@ def build_profile_args(proc_name: str, profile: str):
     return ""
 
 
-# ★ 重写打分函数 —— 浏览器严格 profile 匹配
 def score_window_for_program(program, w):
     score = 0
     keyword = (program.get("window_keyword", "") or "").strip().lower()
     profile_name = (program.get("profile_name", "") or "").strip().lower()
     title_sig = (program.get("title_sig", "") or "").strip().lower()
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
-    path = program.get("path", "")
 
     w_title = (w.get("title", "") or "").lower()
     w_sig = (w.get("title_sig", "") or "").lower()
     w_prof = (w.get("profile", "") or "").strip().lower()
 
-    is_browser = is_browser_exe(path)
+    if keyword and w_prof:
+        if w_prof == keyword:
+            score += 120
+        elif keyword in w_prof:
+            score += 90
 
-    # ★ 浏览器 + 有 profile_name → 严格比对 cmdline --profile-directory
-    if is_browser and profile_name:
-        if w_prof:
-            if w_prof == profile_name:
-                score += 500          # 精确命中，权重碾压其它因素
-            else:
-                return -9999          # profile 不同 → 直接排除
-        else:
-            score -= 100              # 窗口未检测到 profile → 大幅降权
-
-    # ★ 非浏览器的常规匹配（保持原逻辑）
-    if not (is_browser and profile_name):
-        if keyword and w_prof:
-            if w_prof == keyword:
-                score += 120
-            elif keyword in w_prof:
-                score += 90
-        if profile_name and w_prof:
-            if w_prof == profile_name:
-                score += 100
-            elif profile_name in w_prof:
-                score += 70
+    if profile_name and w_prof:
+        if w_prof == profile_name:
+            score += 100
+        elif profile_name in w_prof:
+            score += 70
 
     if title_sig and w_sig:
         if w_sig == title_sig:
@@ -464,7 +534,10 @@ def find_window_for_program(program):
         return None
 
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
+    keyword = (program.get("window_keyword", "") or "").strip().lower()
     bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
+    title_sig = (program.get("title_sig", "") or "").strip().lower()
+    profile_name = (program.get("profile_name", "") or "").strip().lower()
 
     if match_mode == "hwnd" and bind_hwnd and is_hwnd_valid(bind_hwnd):
         pid = get_pid_from_hwnd(bind_hwnd)
@@ -480,17 +553,11 @@ def find_window_for_program(program):
     for w in candidates:
         s = score_window_for_program(program, w)
         scored.append((s, int(w["hwnd"]), w))
-
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best_hwnd, _ = scored[0]
 
-    keyword = (program.get("window_keyword", "") or "").strip()
-    profile_name = (program.get("profile_name", "") or "").strip()
-    title_sig = (program.get("title_sig", "") or "").strip()
-
     if (keyword or profile_name or title_sig) and best_score <= 0:
         return None
-
     return best_hwnd
 
 
@@ -501,7 +568,6 @@ def toggle_program(program):
         return None, False
 
     hwnd = find_window_for_program(program)
-
     if hwnd:
         fg = user32.GetForegroundWindow()
         if hwnd == fg:
@@ -528,8 +594,7 @@ def toggle_program(program):
 def ask_profile_input(parent, default_profile=""):
     dlg = wx.TextEntryDialog(
         parent,
-        "请输入浏览器 Profile（如 Profile 1 / Default / Work）\n"
-        "这个值必须与 Chrome 命令行的 --profile-directory 完全一致！",
+        "请输入浏览器 Profile（如 Profile 1 / Default / Work）",
         "确认 Profile",
         value=default_profile or ""
     )
@@ -616,11 +681,9 @@ class QuickLauncherFrame(wx.Frame):
         cfg = load_config()
         self.programs = cfg["programs"]
         self.autostart = cfg["autostart"]
-
         self.hotkey_id_to_index = {}
         self.registered_hotkey_ids = []
         self.exiting = False
-        self._bind_tick = 0  # ★ 周期补绑计数器
 
         self.init_ui()
         self.Centre()
@@ -637,32 +700,6 @@ class QuickLauncherFrame(wx.Frame):
 
     def on_timer(self, _):
         update_last_active_cache()
-        # ★ 每 ~5 秒自动补绑一次未绑定的浏览器条目
-        self._bind_tick += 1
-        if self._bind_tick % 4 == 0:
-            self.periodic_auto_bind()
-
-    # ★ 新增：周期自动补绑
-    def periodic_auto_bind(self):
-        changed = False
-        for i, p in enumerate(self.programs):
-            if (p.get("match_mode", "title") or "title").lower() != "hwnd":
-                continue
-            path = p.get("path", "")
-            if not path:
-                continue
-            h = int(p.get("bind_hwnd", 0) or 0)
-            if h and is_hwnd_valid(h):
-                # 再验证路径
-                pid = get_pid_from_hwnd(h)
-                cpath, _, _ = get_proc_path_name_cmdline(pid)
-                if os.path.normcase(cpath or "") == os.path.normcase(path or ""):
-                    continue  # 已绑定且有效
-            if self.auto_bind_program_if_needed(i, save=False):
-                changed = True
-        if changed:
-            self.persist()
-            self.refresh_list()
 
     def init_ui(self):
         panel = wx.Panel(self)
@@ -672,10 +709,10 @@ class QuickLauncherFrame(wx.Frame):
         self.list_ctrl.InsertColumn(0, "名称", width=120)
         self.list_ctrl.InsertColumn(1, "快捷键", width=120)
         self.list_ctrl.InsertColumn(2, "模式", width=80)
-        self.list_ctrl.InsertColumn(3, "关键词", width=140)
+        self.list_ctrl.InsertColumn(3, "关键词", width=160)
         self.list_ctrl.InsertColumn(4, "HWND", width=90)
         self.list_ctrl.InsertColumn(5, "Profile", width=100)
-        self.list_ctrl.InsertColumn(6, "TitleSig", width=160)
+        self.list_ctrl.InsertColumn(6, "TitleSig", width=180)
         self.list_ctrl.InsertColumn(7, "路径", width=240)
         root.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
 
@@ -686,7 +723,6 @@ class QuickLauncherFrame(wx.Frame):
             ("删除", self.on_delete),
             ("设置快捷键", self.on_set_hotkey),
             ("设置匹配", self.on_set_match),
-            ("诊断 Profile", self.on_diagnose_profiles),  # ★ 新增
             ("最小化到托盘", lambda e: self.hide_to_tray()),
         ]:
             b = wx.Button(panel, label=label)
@@ -761,42 +797,6 @@ class QuickLauncherFrame(wx.Frame):
         self.persist()
         wx.MessageBox("设置已保存", "成功")
 
-    # ---- ★ 诊断 Profile 按钮 ----
-    def on_diagnose_profiles(self, _):
-        """列出所有浏览器窗口的 PID / cmdline profile / 标题，方便排查"""
-        all_ws = enum_visible_app_windows()
-        browser_ws = [w for w in all_ws if is_browser_exe(w.get("path", "") or w.get("proc_name", ""))]
-
-        if not browser_ws:
-            wx.MessageBox("当前没有检测到运行中的浏览器窗口。", "诊断结果")
-            return
-
-        lines = []
-        for w in browser_ws:
-            cmdline_short = " ".join(w.get("cmdline", [])[:6])
-            if len(cmdline_short) > 200:
-                cmdline_short = cmdline_short[:200] + "..."
-            lines.append(
-                f"HWND={w['hwnd']}  PID={w['pid']}\n"
-                f"  程序: {w.get('proc_name', '')}\n"
-                f"  Profile(cmdline): {w.get('profile', '') or '(未检测到)'}\n"
-                f"  标题: {w.get('title', '')[:80]}\n"
-                f"  cmdline: {cmdline_short}\n"
-            )
-
-        dlg = wx.Dialog(self, title="浏览器 Profile 诊断", size=(800, 500))
-        panel = wx.Panel(dlg)
-        s = wx.BoxSizer(wx.VERTICAL)
-        s.Add(wx.StaticText(panel, label="以下是所有浏览器窗口的 Profile 检测结果："), 0, wx.ALL, 8)
-        tc = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
-        tc.SetValue("\n".join(lines))
-        s.Add(tc, 1, wx.ALL | wx.EXPAND, 8)
-        btn = wx.Button(panel, wx.ID_OK, "关闭")
-        s.Add(btn, 0, wx.ALL | wx.ALIGN_CENTER, 8)
-        panel.SetSizer(s)
-        dlg.ShowModal()
-        dlg.Destroy()
-
     # ---- 自动补绑逻辑 ----
     def get_used_hwnds_by_same_path(self, path, exclude_index=None):
         used = set()
@@ -824,7 +824,6 @@ class QuickLauncherFrame(wx.Frame):
         if not path:
             return False
 
-        # 已绑定且有效 → 不覆盖
         if current and is_hwnd_valid(current):
             pid = get_pid_from_hwnd(current)
             cpath, _, _ = get_proc_path_name_cmdline(pid)
@@ -931,7 +930,6 @@ class QuickLauncherFrame(wx.Frame):
         idx = self.hotkey_id_to_index.get(event.GetId())
         if idx is None or idx >= len(self.programs):
             return
-
         p = self.programs[idx]
         mode = (p.get("match_mode", "title") or "title").lower()
         old_hwnd = int(p.get("bind_hwnd", 0) or 0)
@@ -941,7 +939,6 @@ class QuickLauncherFrame(wx.Frame):
             old_hwnd = int(p.get("bind_hwnd", 0) or 0)
 
         hwnd, _focused = toggle_program(p)
-
         changed = False
 
         if mode == "hwnd":
@@ -951,12 +948,10 @@ class QuickLauncherFrame(wx.Frame):
                 cpath, _, _ = get_proc_path_name_cmdline(pid)
                 if os.path.normcase(cpath or "") == os.path.normcase(p.get("path", "") or ""):
                     keep_old = True
-
             if hwnd and not keep_old and hwnd != old_hwnd:
                 p["bind_hwnd"] = int(hwnd)
                 p["title_sig"] = make_title_signature(get_window_title(hwnd))
                 changed = True
-
             auto_cnt = self.auto_bind_unbound_same_browser(idx)
             if auto_cnt > 0:
                 changed = True
@@ -964,7 +959,6 @@ class QuickLauncherFrame(wx.Frame):
         if changed:
             self.persist()
             self.refresh_list()
-
         self.update_status(f"已切换：{p.get('name', '')}")
 
     # ---- 添加/编辑 ----
@@ -1026,7 +1020,7 @@ class QuickLauncherFrame(wx.Frame):
                 "window_keyword": kw.GetValue().strip(),
                 "match_mode": mode.GetStringSelection() or "title",
                 "bind_hwnd": int(hwnd.GetValue().strip() or "0") if hwnd.GetValue().strip().isdigit() else 0,
-                "profile_name": kw.GetValue().strip() if mode.GetStringSelection() == "profile" else "",
+                "profile_name": kw.GetValue().strip() if (mode.GetStringSelection() == "profile") else "",
                 "title_sig": ""
             }
             if not p["name"] or not p["path"]:
@@ -1045,23 +1039,21 @@ class QuickLauncherFrame(wx.Frame):
         if not ws:
             wx.MessageBox("未找到运行窗口", "提示")
             return
-
         ws = [w for w in ws if w.get("path", "").lower().endswith(".exe")]
         ws.sort(key=lambda x: (x.get("title", "") or "").lower())
 
         dlg = wx.Dialog(self, title="从运行窗口添加", size=(1020, 520))
         panel = wx.Panel(dlg)
         s = wx.BoxSizer(wx.VERTICAL)
-        tip = wx.StaticText(panel, label="双击添加：浏览器默认用 hwnd 模式 + 严格 Profile 匹配")
+        tip = wx.StaticText(panel, label="双击添加：浏览器默认用 hwnd 模式 + 自动重绑（Profile 列现在会正确区分）")
         s.Add(tip, 0, wx.ALL, 8)
 
         lc = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        lc.InsertColumn(0, "标题", width=280)
-        lc.InsertColumn(1, "程序", width=100)
-        lc.InsertColumn(2, "Profile(cmdline)", width=130)   # ★ 改名更清晰
-        lc.InsertColumn(3, "PID", width=70)                 # ★ 新增
-        lc.InsertColumn(4, "HWND", width=90)
-        lc.InsertColumn(5, "路径", width=300)
+        lc.InsertColumn(0, "标题", width=330)
+        lc.InsertColumn(1, "程序", width=110)
+        lc.InsertColumn(2, "Profile", width=120)
+        lc.InsertColumn(3, "HWND", width=90)
+        lc.InsertColumn(4, "路径", width=330)
 
         rows = []
         for w in ws:
@@ -1074,16 +1066,14 @@ class QuickLauncherFrame(wx.Frame):
                 "profile": w.get("profile", ""),
                 "proc_name": w.get("proc_name", ""),
                 "hwnd": int(w.get("hwnd", 0)),
-                "pid": int(w.get("pid", 0)),
                 "title_sig": w.get("title_sig", "")
             }
             rows.append(row)
-            i = lc.InsertItem(lc.GetItemCount(), row["title"][:80] or "(无标题)")
+            i = lc.InsertItem(lc.GetItemCount(), row["title"] or "(无标题)")
             lc.SetItem(i, 1, row["name"])
-            lc.SetItem(i, 2, row["profile"] or "(无)")
-            lc.SetItem(i, 3, str(row["pid"]))
-            lc.SetItem(i, 4, str(row["hwnd"]))
-            lc.SetItem(i, 5, row["path"])
+            lc.SetItem(i, 2, row["profile"])
+            lc.SetItem(i, 3, str(row["hwnd"]))
+            lc.SetItem(i, 4, row["path"])
 
         def on_dbl(_e):
             i = lc.GetFirstSelected()
@@ -1191,9 +1181,8 @@ class QuickLauncherFrame(wx.Frame):
             r.Add(ctrl, 1, wx.ALL | wx.EXPAND, 6)
             s.Add(r, 0, wx.EXPAND)
 
-        tip = wx.StaticText(panel,
-            label="★ 浏览器请确保 Profile名 与 --profile-directory 完全一致（如 Default / Profile 1 / Profile 2）")
-        tip.SetForegroundColour(wx.Colour(200, 50, 50))
+        tip = wx.StaticText(panel, label="浏览器推荐：mode=hwnd，profile_name 填 Profile 目录名（如 Profile 1）")
+        tip.SetForegroundColour(wx.Colour(100, 100, 100))
         s.Add(tip, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         btns = wx.StdDialogButtonSizer()
