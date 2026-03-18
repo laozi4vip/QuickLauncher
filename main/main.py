@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-QuickLauncher - 浏览器多用户稳定控制版（含 HWND 失效后自动重绑）
+QuickLauncher - 浏览器多用户稳定控制版（含 HWND 失效后自动重绑 + 同浏览器未绑定自动补绑）
 """
 
 import wx
@@ -102,7 +102,7 @@ def load_config():
                 p.setdefault("match_mode", "title")  # title/profile/hwnd
                 p.setdefault("bind_hwnd", 0)
                 p.setdefault("profile_name", "")
-                p.setdefault("title_sig", "")        # 新增：标题签名用于重绑
+                p.setdefault("title_sig", "")
             return {"programs": programs, "autostart": autostart}
         except Exception as e:
             print("load_config error:", e)
@@ -161,10 +161,14 @@ def hotkey_to_mod_vk(hotkey: str):
         raise ValueError("无修饰键仅支持 F1-F12")
 
     ordered = []
-    if mods & MOD_CONTROL: ordered.append("ctrl")
-    if mods & MOD_SHIFT:   ordered.append("shift")
-    if mods & MOD_ALT:     ordered.append("alt")
-    if mods & MOD_WIN:     ordered.append("win")
+    if mods & MOD_CONTROL:
+        ordered.append("ctrl")
+    if mods & MOD_SHIFT:
+        ordered.append("shift")
+    if mods & MOD_ALT:
+        ordered.append("alt")
+    if mods & MOD_WIN:
+        ordered.append("win")
     normalized = "+".join(ordered + [main_key]) if ordered else main_key
 
     return mods, key_map[main_key], normalized
@@ -186,10 +190,14 @@ def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
         return ""
 
     mods = []
-    if event.ControlDown(): mods.append("ctrl")
-    if event.ShiftDown():   mods.append("shift")
-    if event.AltDown():     mods.append("alt")
-    if event.MetaDown():    mods.append("win")
+    if event.ControlDown():
+        mods.append("ctrl")
+    if event.ShiftDown():
+        mods.append("shift")
+    if event.AltDown():
+        mods.append("alt")
+    if event.MetaDown():
+        mods.append("win")
 
     if not mods and not main_key.startswith("f"):
         return ""
@@ -311,7 +319,6 @@ def make_title_signature(title: str):
     if not t:
         return ""
     t = re.sub(r"\s+", " ", t)
-    # 去掉网页标题前半部分，只取后缀更稳定（如 “- Google Chrome”）
     parts = [x.strip() for x in t.split("-") if x.strip()]
     if len(parts) >= 2:
         return " - ".join(parts[-2:])[:120]
@@ -401,6 +408,47 @@ def build_profile_args(proc_name: str, profile: str):
     return ""
 
 
+def score_window_for_program(program, w):
+    score = 0
+    keyword = (program.get("window_keyword", "") or "").strip().lower()
+    profile_name = (program.get("profile_name", "") or "").strip().lower()
+    title_sig = (program.get("title_sig", "") or "").strip().lower()
+    match_mode = (program.get("match_mode", "title") or "title").strip().lower()
+
+    w_title = (w.get("title", "") or "").lower()
+    w_sig = (w.get("title_sig", "") or "").lower()
+    w_prof = (w.get("profile", "") or "").strip().lower()
+
+    if keyword and w_prof:
+        if w_prof == keyword:
+            score += 120
+        elif keyword in w_prof:
+            score += 90
+
+    if profile_name and w_prof:
+        if w_prof == profile_name:
+            score += 100
+        elif profile_name in w_prof:
+            score += 70
+
+    if title_sig and w_sig:
+        if w_sig == title_sig:
+            score += 60
+        elif title_sig in w_sig or w_sig in title_sig:
+            score += 35
+
+    if match_mode == "title" and keyword and keyword in w_title:
+        score += 80
+
+    hwnd = int(w.get("hwnd", 0) or 0)
+    if hwnd == user32.GetForegroundWindow():
+        score += 20
+    if hwnd and not user32.IsIconic(hwnd):
+        score += 10
+
+    return score
+
+
 # ---------------------------
 # 核心查找（含 HWND 自动重绑）
 # ---------------------------
@@ -415,67 +463,26 @@ def find_window_for_program(program):
     title_sig = (program.get("title_sig", "") or "").strip().lower()
     profile_name = (program.get("profile_name", "") or "").strip().lower()
 
-    # 1) hwnd 直接命中
+    # 1) hwnd 直接命中：已绑定且有效则优先返回（不改绑定）
     if match_mode == "hwnd" and bind_hwnd and is_hwnd_valid(bind_hwnd):
         pid = get_pid_from_hwnd(bind_hwnd)
         ppath, _, _ = get_proc_path_name_cmdline(pid)
         if os.path.normcase(ppath or "") == os.path.normcase(path or ""):
             return bind_hwnd
 
-    # 2) hwnd 失效 -> 自动重绑候选
+    # 2) 否则走候选
     candidates = enum_windows_for_program(path)
     if not candidates:
         return None
 
-    exe = os.path.basename(path).lower().replace(".exe", "")
     scored = []
-
     for w in candidates:
-        score = 0
-        w_title = (w.get("title", "") or "").lower()
-        w_sig = (w.get("title_sig", "") or "").lower()
-        w_prof = (w.get("profile", "") or "").strip().lower()
-
-        # profile强匹配优先
-        if keyword and w_prof:
-            if w_prof == keyword:
-                score += 120
-            elif keyword in w_prof:
-                score += 90
-
-        if profile_name and w_prof:
-            if w_prof == profile_name:
-                score += 100
-            elif profile_name in w_prof:
-                score += 70
-
-        # 标题签名辅助
-        if title_sig and w_sig:
-            if w_sig == title_sig:
-                score += 60
-            elif title_sig in w_sig or w_sig in title_sig:
-                score += 35
-
-        # title模式关键词
-        if match_mode == "title" and keyword:
-            if keyword in w_title:
-                score += 80
-
-        # 前台/非最小化偏好
-        hwnd = w["hwnd"]
-        if hwnd == user32.GetForegroundWindow():
-            score += 20
-        if not user32.IsIconic(hwnd):
-            score += 10
-
-        scored.append((score, hwnd, w))
+        s = score_window_for_program(program, w)
+        scored.append((s, int(w["hwnd"]), w))
 
     scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_hwnd, _ = scored[0]
 
-    best_score, best_hwnd, best_w = scored[0]
-
-    # profile/title/hwnd 模式都允许兜底返回（分数低也能工作）
-    # 但如果有关键词，至少需要有一点相关性，避免串窗
     if (keyword or profile_name or title_sig) and best_score <= 0:
         return None
 
@@ -486,7 +493,7 @@ def toggle_program(program):
     path = program.get("path", "")
     args = program.get("args", "")
     if not path:
-        return None, False  # hwnd, rebound?
+        return None, False
 
     hwnd = find_window_for_program(program)
 
@@ -726,6 +733,100 @@ class QuickLauncherFrame(wx.Frame):
         self.persist()
         wx.MessageBox("设置已保存", "成功")
 
+    # ---- 自动补绑逻辑 ----
+    def get_used_hwnds_by_same_path(self, path, exclude_index=None):
+        used = set()
+        tpath = os.path.normcase(path or "")
+        for i, p in enumerate(self.programs):
+            if exclude_index is not None and i == exclude_index:
+                continue
+            ppath = os.path.normcase(p.get("path", "") or "")
+            if ppath != tpath:
+                continue
+            h = int(p.get("bind_hwnd", 0) or 0)
+            if h and is_hwnd_valid(h):
+                used.add(h)
+        return used
+
+    def auto_bind_program_if_needed(self, idx, windows_cache=None, save=False):
+        """仅在未绑定或已失效时才绑定；已绑定且有效不改。返回是否发生绑定变更。"""
+        if idx < 0 or idx >= len(self.programs):
+            return False
+        p = self.programs[idx]
+        if (p.get("match_mode", "title") or "title").lower() != "hwnd":
+            return False
+
+        current = int(p.get("bind_hwnd", 0) or 0)
+        path = p.get("path", "")
+        if not path:
+            return False
+
+        # 已绑定且有效：不再绑定覆盖
+        if current and is_hwnd_valid(current):
+            pid = get_pid_from_hwnd(current)
+            cpath, _, _ = get_proc_path_name_cmdline(pid)
+            if os.path.normcase(cpath or "") == os.path.normcase(path or ""):
+                return False
+
+        cands = windows_cache if windows_cache is not None else enum_windows_for_program(path)
+        if not cands:
+            return False
+
+        used = self.get_used_hwnds_by_same_path(path, exclude_index=idx)
+        scored = []
+        for w in cands:
+            hwnd = int(w.get("hwnd", 0) or 0)
+            if not hwnd or hwnd in used or not is_hwnd_valid(hwnd):
+                continue
+            s = score_window_for_program(p, w)
+            scored.append((s, hwnd, w))
+
+        if not scored:
+            return False
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_hwnd, best_w = scored[0]
+
+        kw = (p.get("window_keyword", "") or "").strip()
+        pf = (p.get("profile_name", "") or "").strip()
+        ts = (p.get("title_sig", "") or "").strip()
+        if (kw or pf or ts) and best_score <= 0:
+            return False
+
+        p["bind_hwnd"] = int(best_hwnd)
+        if not (p.get("title_sig", "") or "").strip():
+            p["title_sig"] = best_w.get("title_sig", "") or make_title_signature(best_w.get("title", ""))
+        if save:
+            self.persist()
+        return True
+
+    def auto_bind_unbound_same_browser(self, base_index):
+        """给同 path 的 hwnd 模式项进行批量补绑（仅补未绑定/失效的）"""
+        if base_index < 0 or base_index >= len(self.programs):
+            return 0
+        base = self.programs[base_index]
+        path = base.get("path", "")
+        if not path:
+            return 0
+
+        cands = enum_windows_for_program(path)
+        if not cands:
+            return 0
+
+        changed = 0
+        for i, p in enumerate(self.programs):
+            if os.path.normcase(p.get("path", "") or "") != os.path.normcase(path or ""):
+                continue
+            if (p.get("match_mode", "title") or "title").lower() != "hwnd":
+                continue
+            if self.auto_bind_program_if_needed(i, windows_cache=cands, save=False):
+                changed += 1
+
+        if changed:
+            self.persist()
+            self.refresh_list()
+        return changed
+
     # ---- 热键 ----
     def unregister_all_hotkeys(self):
         for i in self.registered_hotkey_ids:
@@ -750,11 +851,11 @@ class QuickLauncherFrame(wx.Frame):
                 mods, vk, n = hotkey_to_mod_vk(hk)
                 self.programs[idx]["hotkey"] = n
             except Exception as e:
-                fail.append(f"{p.get('name','')}：{hk} ({e})")
+                fail.append(f"{p.get('name', '')}：{hk} ({e})")
                 continue
 
             if n in used:
-                fail.append(f"{p.get('name','')}：{n}（重复）")
+                fail.append(f"{p.get('name', '')}：{n}（重复）")
                 continue
             used.add(n)
 
@@ -764,7 +865,7 @@ class QuickLauncherFrame(wx.Frame):
                 self.hotkey_id_to_index[hotkey_id] = idx
                 self.Bind(wx.EVT_HOTKEY, self.on_hotkey, id=hotkey_id)
             else:
-                fail.append(f"{p.get('name','')}：{n}（被占用）")
+                fail.append(f"{p.get('name', '')}：{n}（被占用）")
 
         self.persist()
         self.refresh_list()
@@ -777,18 +878,43 @@ class QuickLauncherFrame(wx.Frame):
             return
 
         p = self.programs[idx]
+        mode = (p.get("match_mode", "title") or "title").lower()
         old_hwnd = int(p.get("bind_hwnd", 0) or 0)
-        hwnd, focused = toggle_program(p)
 
-        # 自动重绑：旧hwnd失效后找到新hwnd则写回配置
-        if p.get("match_mode", "title") == "hwnd" and hwnd and hwnd != old_hwnd:
-            p["bind_hwnd"] = int(hwnd)
-            # 同步 title_sig，提升下次重绑命中率
-            p["title_sig"] = make_title_signature(get_window_title(hwnd))
+        # 先补一次当前项绑定（仅未绑定/失效时）
+        if mode == "hwnd":
+            self.auto_bind_program_if_needed(idx, save=True)
+            old_hwnd = int(p.get("bind_hwnd", 0) or 0)
+
+        hwnd, _focused = toggle_program(p)
+
+        changed = False
+
+        if mode == "hwnd":
+            # 已绑定且有效 -> 不覆盖
+            keep_old = False
+            if old_hwnd and is_hwnd_valid(old_hwnd):
+                pid = get_pid_from_hwnd(old_hwnd)
+                cpath, _, _ = get_proc_path_name_cmdline(pid)
+                if os.path.normcase(cpath or "") == os.path.normcase(p.get("path", "") or ""):
+                    keep_old = True
+
+            # 仅在旧绑定无效时，才接收新 hwnd 作为重绑
+            if hwnd and not keep_old and hwnd != old_hwnd:
+                p["bind_hwnd"] = int(hwnd)
+                p["title_sig"] = make_title_signature(get_window_title(hwnd))
+                changed = True
+
+            # 自动给同浏览器未绑定/失效项补绑
+            auto_cnt = self.auto_bind_unbound_same_browser(idx)
+            if auto_cnt > 0:
+                changed = True
+
+        if changed:
             self.persist()
             self.refresh_list()
 
-        self.update_status(f"已切换：{p.get('name','')}")
+        self.update_status(f"已切换：{p.get('name', '')}")
 
     # ---- 添加/编辑 ----
     def on_manual_add(self, _):
@@ -818,14 +944,16 @@ class QuickLauncherFrame(wx.Frame):
         row("HWND:", hwnd)
 
         b = wx.Button(panel, label="浏览exe")
+
         def browse(_e):
             fd = wx.FileDialog(panel, "选择程序", wildcard="*.exe", style=wx.FD_OPEN)
             if fd.ShowModal() == wx.ID_OK:
-                p = fd.GetPath()
-                path.SetValue(p)
+                pth = fd.GetPath()
+                path.SetValue(pth)
                 if not name.GetValue().strip():
-                    name.SetValue(os.path.splitext(os.path.basename(p))[0])
+                    name.SetValue(os.path.splitext(os.path.basename(pth))[0])
             fd.Destroy()
+
         b.Bind(wx.EVT_BUTTON, browse)
         s.Add(b, 0, wx.ALL | wx.ALIGN_CENTER, 6)
 
@@ -869,7 +997,6 @@ class QuickLauncherFrame(wx.Frame):
             wx.MessageBox("未找到运行窗口", "提示")
             return
 
-        # 过滤可执行路径
         ws = [w for w in ws if w.get("path", "").lower().endswith(".exe")]
         ws.sort(key=lambda x: (x.get("title", "") or "").lower())
 
