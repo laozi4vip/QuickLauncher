@@ -693,11 +693,17 @@ def get_icon_path():
         base = os.path.dirname(sys.executable)
     else:
         base = BASE_DIR
-    icon_path = os.path.join(base, "icon.ico")
-    if os.path.exists(icon_path):
-        return icon_path
-    # 备选：从当前目录查找
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+    
+    # 优先查找 ICO，其次 PNG
+    for ext in ['icon.ico', 'icon.png']:
+        icon_path = os.path.join(base, ext)
+        if os.path.exists(icon_path):
+            return icon_path
+        # 备选：从当前目录查找
+        alt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ext)
+        if os.path.exists(alt_path):
+            return alt_path
+    return None
 
 class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
     def __init__(self, frame):
@@ -705,8 +711,13 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
         self.frame = frame
         # 加载图标文件
         icon_path = get_icon_path()
-        if os.path.exists(icon_path):
-            icon = wx.Icon(icon_path, wx.BITMAP_TYPE_ICO)
+        if icon_path and os.path.exists(icon_path):
+            if icon_path.endswith('.png'):
+                bmp = wx.Bitmap(icon_path, wx.BITMAP_TYPE_PNG)
+                icon = wx.Icon()
+                icon.CopyFromBitmap(bmp)
+            else:
+                icon = wx.Icon(icon_path, wx.BITMAP_TYPE_ICO)
         else:
             bmp = wx.ArtProvider.GetBitmap(wx.ART_EXECUTABLE_FILE, wx.ART_OTHER, (16, 16))
             icon = wx.Icon()
@@ -738,8 +749,14 @@ class QuickLauncherFrame(wx.Frame):
         
         # 设置窗口图标
         icon_path = get_icon_path()
-        if os.path.exists(icon_path):
-            self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_ICO))
+        if icon_path and os.path.exists(icon_path):
+            if icon_path.endswith('.png'):
+                bmp = wx.Bitmap(icon_path, wx.BITMAP_TYPE_PNG)
+                icon = wx.Icon()
+                icon.CopyFromBitmap(bmp)
+                self.SetIcon(icon)
+            else:
+                self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_ICO))
         
         cfg = load_config()
         self.programs = cfg["programs"]
