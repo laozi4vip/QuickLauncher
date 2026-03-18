@@ -172,10 +172,11 @@ def parse_hotkey(hotkey: str):
         if 1 <= fn <= 12:
             vk = 0x70 + (fn - 1)  # VK_F1 = 0x70
 
-    if mod_val == 0 or vk is None:
+    if vk is None:
         return None
     return mod_val, vk
 
+    return None
 
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
