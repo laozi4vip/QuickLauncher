@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-QuickLauncher - Windows任务栏快捷启动器（浏览器多用户稳定匹配增强版）
-修复重点：
-1) 浏览器窗口匹配支持 profile（cmdline + 标题兜底推断）
-2) 从运行窗口添加时，浏览器 profile 可手动确认/修正，避免“都一样”
-3) 浏览器新增项自动补启动参数（profile 参数）
-4) 兼容旧配置（无 match_mode 时沿用 title contains 逻辑）
+QuickLauncher - Windows任务栏快捷启动器（浏览器多用户稳定控制增强版）
+增强重点：
+1) 新增 match_mode=hwnd：绑定具体窗口句柄（最稳）
+2) 浏览器多用户增加“最近激活窗口缓存”机制
+3) profile 匹配作为兜底，不再单纯依赖 cmdline
+4) 从运行窗口添加时可直接绑定 hwnd + 可选 profile 参数
 """
 
 import wx
@@ -19,6 +19,7 @@ import sys
 import winreg
 import shlex
 import re
+import time
 
 # ---------------------------
 # Windows API & 常量
@@ -101,7 +102,9 @@ def load_config():
                 p.setdefault("args", "")
                 p.setdefault("hotkey", "")
                 p.setdefault("window_keyword", "")
-                p.setdefault("match_mode", "title")  # title / profile
+                p.setdefault("match_mode", "title")   # title / profile / hwnd
+                p.setdefault("bind_hwnd", 0)          # 绑定窗口句柄
+                p.setdefault("profile_name", "")      # 仅浏览器用于缓存key
             return {"programs": programs, "autostart": autostart}
         except Exception as e:
             print("load_config error:", e)
@@ -239,6 +242,13 @@ def is_alt_tab_window(hwnd):
     return True
 
 
+def is_hwnd_valid(hwnd: int):
+    try:
+        return bool(hwnd) and bool(user32.IsWindow(hwnd)) and bool(user32.IsWindowVisible(hwnd))
+    except Exception:
+        return False
+
+
 def get_proc_path_name_cmdline(pid):
     try:
         p = psutil.Process(pid)
@@ -254,12 +264,10 @@ def get_proc_path_name_cmdline(pid):
 
 
 def parse_profile_from_cmdline(proc_name: str, cmdline_list):
-    """返回 profile 名（如 Profile 1、Default、Work），拿不到返回空"""
     name = (proc_name or "").lower().replace(".exe", "")
     args = cmdline_list or []
 
     def value_after(prefix):
-        # 支持 --xxx=yyy 或 --xxx yyy
         for i, a in enumerate(args):
             la = a.lower()
             if la.startswith(prefix + "="):
@@ -268,7 +276,6 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
                 return (args[i + 1] or "").strip().strip('"')
         return ""
 
-    # Chrome / Edge / Chromium 系
     if name in ("chrome", "msedge", "chromium", "brave"):
         v = value_after("--profile-directory")
         if v:
@@ -278,7 +285,6 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
             return os.path.basename(u.rstrip("\\/"))
         return ""
 
-    # Firefox
     if name == "firefox":
         for i, a in enumerate(args):
             la = a.lower()
@@ -293,25 +299,20 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
 
 
 def parse_profile_from_title(proc_name: str, title: str):
-    """从标题兜底猜 profile（不是100%准确，但能修正很多“都一样”的情况）"""
     name = (proc_name or "").lower().replace(".exe", "")
     t = (title or "").strip()
-
     if not t:
         return ""
 
-    # 常见：Profile 1 / Profile 2 / Default
     m = re.search(r"\b(Profile\s*\d+|Default)\b", t, re.IGNORECASE)
     if m:
         return m.group(1).strip()
 
-    # Edge 常见：Personal / Work
     if name == "msedge":
         m2 = re.search(r"\b(Personal|Work|Guest)\b", t, re.IGNORECASE)
         if m2:
             return m2.group(1).strip()
 
-    # Firefox 也可能在标题出现 profile 词
     if name == "firefox":
         m3 = re.search(r"\b(Profile\s*\d+|Default)\b", t, re.IGNORECASE)
         if m3:
@@ -367,19 +368,38 @@ def enum_windows_for_program(path):
     all_ws = enum_visible_app_windows()
     for w in all_ws:
         wpath = os.path.normcase(w.get("path", "") or "")
-        if not wpath:
-            continue
-        if wpath == target:
-            result.append((w["hwnd"], w["title"], w["profile"], w["pid"]))
+        if wpath and target and wpath == target:
+            result.append((w["hwnd"], w["title"], w["profile"], w["pid"], w["proc_name"]))
 
     if not result and path:
         exe_name = os.path.basename(path).lower().replace(".exe", "")
         for w in all_ws:
             pn = (w.get("proc_name", "") or "").lower().replace(".exe", "")
             if pn == exe_name:
-                result.append((w["hwnd"], w["title"], w["profile"], w["pid"]))
+                result.append((w["hwnd"], w["title"], w["profile"], w["pid"], w["proc_name"]))
 
     return result
+
+
+# 全局缓存：最近激活窗口（同exe + profile）
+LAST_ACTIVE_PROFILE_HWND = {}  # key=(exe_lower, profile_lower)->(hwnd, ts)
+
+
+def update_last_active_cache():
+    hwnd = user32.GetForegroundWindow()
+    if not is_hwnd_valid(hwnd):
+        return
+    try:
+        pid = get_pid_from_hwnd(hwnd)
+        path, proc_name, cmdline = get_proc_path_name_cmdline(pid)
+        title = get_window_title(hwnd).strip()
+        profile = guess_profile(proc_name, cmdline, title)
+
+        exe = (os.path.basename(path) if path else proc_name or "").lower().replace(".exe", "")
+        if exe in BROWSER_SET and profile:
+            LAST_ACTIVE_PROFILE_HWND[(exe, profile.strip().lower())] = (int(hwnd), time.time())
+    except Exception:
+        pass
 
 
 def find_window_for_program(program):
@@ -389,19 +409,40 @@ def find_window_for_program(program):
 
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
     keyword = (program.get("window_keyword", "") or "").strip().lower()
+    bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
+
+    # 1) hwnd 绑定模式（最高优先级）
+    if match_mode == "hwnd" and bind_hwnd:
+        if is_hwnd_valid(bind_hwnd):
+            # 再次确认是同程序
+            pid = get_pid_from_hwnd(bind_hwnd)
+            ppath, _, _ = get_proc_path_name_cmdline(pid)
+            if os.path.normcase(ppath or "") == os.path.normcase(path or ""):
+                return bind_hwnd
 
     candidates = enum_windows_for_program(path)
 
-    if keyword:
-        if match_mode == "profile":
-            filtered = []
-            for h, t, prof, pid in candidates:
-                p = (prof or "").strip().lower()
-                if p == keyword or (keyword in p):
-                    filtered.append((h, t, prof, pid))
-            candidates = filtered
-        else:
-            candidates = [(h, t, prof, pid) for (h, t, prof, pid) in candidates if keyword in (t or "").lower()]
+    # 2) profile 模式：先尝试最近激活缓存
+    if match_mode == "profile" and keyword:
+        exe = os.path.basename(path).lower().replace(".exe", "")
+        cache = LAST_ACTIVE_PROFILE_HWND.get((exe, keyword))
+        if cache:
+            c_hwnd, _ = cache
+            if is_hwnd_valid(c_hwnd):
+                return c_hwnd
+
+        filtered = []
+        for h, t, prof, pid, _pn in candidates:
+            p = (prof or "").strip().lower()
+            if p == keyword or (keyword in p):
+                filtered.append((h, t, prof, pid))
+        candidates = filtered
+
+    # 3) title 模式
+    elif match_mode == "title" and keyword:
+        candidates = [(h, t, prof, pid) for (h, t, prof, pid, _pn) in candidates if keyword in (t or "").lower()]
+    else:
+        candidates = [(h, t, prof, pid) for (h, t, prof, pid, _pn) in candidates]
 
     if not candidates:
         return None
@@ -475,7 +516,7 @@ def ask_profile_input(parent, default_profile=""):
 
 
 # ---------------------------
-# 程序搜索
+# 程序搜索（原样）
 # ---------------------------
 def collect_search_dirs():
     dirs = []
@@ -618,9 +659,6 @@ class ProgramSearchDialog(wx.Dialog):
         return self.selected_item
 
 
-# ---------------------------
-# 快捷键捕获对话框
-# ---------------------------
 class HotkeyCaptureDialog(wx.Dialog):
     def __init__(self, parent, current_hotkey=""):
         super().__init__(parent, title="设置快捷键（按键自动录入）", size=(500, 250))
@@ -631,11 +669,8 @@ class HotkeyCaptureDialog(wx.Dialog):
 
         tips = wx.StaticText(
             panel,
-            label=(
-                "请直接按下目标快捷键（例如 Ctrl+1、Alt+Q、Ctrl+Shift+F2）\n"
-                "单键仅支持 F1-F12\n"
-                "Esc 取消，Backspace 清空"
-            ),
+            label=("请直接按下目标快捷键（例如 Ctrl+1、Alt+Q、Ctrl+Shift+F2）\n"
+                   "单键仅支持 F1-F12\nEsc 取消，Backspace 清空"),
         )
         tips.SetForegroundColour(wx.Colour(90, 90, 90))
         s.Add(tips, 0, wx.ALL | wx.EXPAND, 10)
@@ -683,9 +718,6 @@ class HotkeyCaptureDialog(wx.Dialog):
             wx.Bell()
 
 
-# ---------------------------
-# 托盘
-# ---------------------------
 class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
     def __init__(self, frame):
         super().__init__()
@@ -707,22 +739,14 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
         self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
         return menu
 
-    def on_show(self, _):
-        self.frame.show_from_tray()
-
-    def on_hide(self, _):
-        self.frame.hide_to_tray()
-
-    def on_exit(self, _):
-        self.frame.exit_app()
+    def on_show(self, _): self.frame.show_from_tray()
+    def on_hide(self, _): self.frame.hide_to_tray()
+    def on_exit(self, _): self.frame.exit_app()
 
 
-# ---------------------------
-# 主窗口
-# ---------------------------
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="QuickLauncher - 快捷启动器", size=(980, 580))
+        super().__init__(None, title="QuickLauncher - 快捷启动器", size=(1020, 600))
         cfg = load_config()
         self.programs = cfg["programs"]
         self.autostart = cfg["autostart"]
@@ -742,6 +766,13 @@ class QuickLauncherFrame(wx.Frame):
 
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
+        self.fg_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self.on_timer_tick, self.fg_timer)
+        self.fg_timer.Start(1200)
+
+    def on_timer_tick(self, _):
+        update_last_active_cache()
+
     def init_ui(self):
         panel = wx.Panel(self)
         root = wx.BoxSizer(wx.VERTICAL)
@@ -752,10 +783,8 @@ class QuickLauncherFrame(wx.Frame):
 
         desc = wx.StaticText(
             panel,
-            label=(
-                "建议：浏览器多用户请使用“匹配模式=profile”，关键词填 Profile 1 / Profile 2 / Default\n"
-                "若运行窗口识别不准，添加时可手动改 profile"
-            )
+            label=("建议：浏览器多用户优先使用 match_mode=hwnd（从运行窗口添加）\n"
+                   "其次可用 profile + 关键词（Profile 1 / Default）")
         )
         desc.SetForegroundColour(wx.Colour(100, 100, 100))
         root.Add(desc, 0, wx.ALL | wx.ALIGN_CENTER, 5)
@@ -765,8 +794,9 @@ class QuickLauncherFrame(wx.Frame):
         self.list_ctrl.InsertColumn(1, "快捷键", width=120)
         self.list_ctrl.InsertColumn(2, "匹配模式", width=90)
         self.list_ctrl.InsertColumn(3, "关键词", width=180)
-        self.list_ctrl.InsertColumn(4, "程序路径", width=320)
-        self.list_ctrl.InsertColumn(5, "启动参数", width=140)
+        self.list_ctrl.InsertColumn(4, "绑定HWND", width=100)
+        self.list_ctrl.InsertColumn(5, "程序路径", width=280)
+        self.list_ctrl.InsertColumn(6, "启动参数", width=180)
         root.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
 
         btn_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -823,6 +853,7 @@ class QuickLauncherFrame(wx.Frame):
                 p.get("hotkey", ""),
                 p.get("match_mode", "title"),
                 p.get("window_keyword", ""),
+                str(p.get("bind_hwnd", 0) or 0),
                 p.get("path", ""),
                 p.get("args", "")
             ])
@@ -877,7 +908,6 @@ class QuickLauncherFrame(wx.Frame):
 
     def register_all_hotkeys(self):
         self.unregister_all_hotkeys()
-
         used = set()
         base_id = 1000
         fail_msgs = []
@@ -927,7 +957,7 @@ class QuickLauncherFrame(wx.Frame):
             wx.MessageBox(f"切换失败：{e}", "错误", wx.OK | wx.ICON_ERROR)
 
     def on_manual_add(self, _):
-        dialog = wx.Dialog(self, title="添加程序", size=(760, 420))
+        dialog = wx.Dialog(self, title="添加程序", size=(760, 430))
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -955,6 +985,7 @@ class QuickLauncherFrame(wx.Frame):
         browse_btn.Bind(wx.EVT_BUTTON, on_browse)
         row2.Add(browse_btn, 0, wx.ALL, 5)
 
+        search_btn = wx.Button(panel, label="搜索程序")
         def on_search(_evt):
             sd = ProgramSearchDialog(self)
             if sd.ShowModal() == wx.ID_OK:
@@ -964,8 +995,6 @@ class QuickLauncherFrame(wx.Frame):
                     if not name_ctrl.GetValue().strip():
                         name_ctrl.SetValue(item["name"])
             sd.Destroy()
-
-        search_btn = wx.Button(panel, label="搜索程序")
         search_btn.Bind(wx.EVT_BUTTON, on_search)
         row2.Add(search_btn, 0, wx.ALL, 5)
         sizer.Add(row2, 0, wx.ALL | wx.EXPAND, 5)
@@ -978,12 +1007,12 @@ class QuickLauncherFrame(wx.Frame):
 
         row4 = wx.BoxSizer(wx.HORIZONTAL)
         row4.Add(wx.StaticText(panel, label="匹配模式:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
-        mode_choice = wx.Choice(panel, choices=["title", "profile"])
+        mode_choice = wx.Choice(panel, choices=["title", "profile", "hwnd"])
         mode_choice.SetSelection(0)
         row4.Add(mode_choice, 0, wx.ALL, 5)
         row4.Add(wx.StaticText(panel, label="关键词:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
         kw_ctrl = wx.TextCtrl(panel, size=(360, -1))
-        kw_ctrl.SetHint("title: 标题包含；profile: 例如 Profile 1 / Default")
+        kw_ctrl.SetHint("title: 标题包含；profile: Profile 1；hwnd 可留空")
         row4.Add(kw_ctrl, 1, wx.ALL | wx.EXPAND, 5)
         sizer.Add(row4, 0, wx.ALL | wx.EXPAND, 5)
 
@@ -1009,7 +1038,9 @@ class QuickLauncherFrame(wx.Frame):
                 "args": args,
                 "hotkey": "",
                 "window_keyword": kw,
-                "match_mode": mode
+                "match_mode": mode,
+                "bind_hwnd": 0,
+                "profile_name": kw if mode == "profile" else ""
             })
             self.persist()
             self.refresh_list()
@@ -1042,7 +1073,8 @@ class QuickLauncherFrame(wx.Frame):
                 "path": path,
                 "title": w.get("title", ""),
                 "profile": w.get("profile", ""),
-                "proc_name": w.get("proc_name", "")
+                "proc_name": w.get("proc_name", ""),
+                "hwnd": int(w.get("hwnd", 0) or 0)
             })
 
         if not running:
@@ -1051,23 +1083,25 @@ class QuickLauncherFrame(wx.Frame):
 
         running.sort(key=lambda x: (x["title"] or x["name"]).lower())
 
-        dialog = wx.Dialog(self, title="选择运行中的窗口", size=(980, 520))
+        dialog = wx.Dialog(self, title="选择运行中的窗口", size=(1030, 540))
         panel = wx.Panel(dialog)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        sizer.Add(wx.StaticText(panel, label="双击添加。浏览器会优先 profile 匹配；若不准会让你手动确认"), 0, wx.ALL, 8)
+        sizer.Add(wx.StaticText(panel, label="双击添加。浏览器将默认使用 hwnd 绑定（最稳）"), 0, wx.ALL, 8)
 
         list_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        list_ctrl.InsertColumn(0, "窗口标题", width=340)
-        list_ctrl.InsertColumn(1, "程序名", width=120)
-        list_ctrl.InsertColumn(2, "Profile(推断)", width=140)
-        list_ctrl.InsertColumn(3, "程序路径", width=340)
+        list_ctrl.InsertColumn(0, "窗口标题", width=320)
+        list_ctrl.InsertColumn(1, "程序名", width=110)
+        list_ctrl.InsertColumn(2, "Profile(推断)", width=130)
+        list_ctrl.InsertColumn(3, "HWND", width=90)
+        list_ctrl.InsertColumn(4, "程序路径", width=340)
 
         for item in running:
             i = list_ctrl.InsertItem(list_ctrl.GetItemCount(), item["title"] or "(无标题)")
             list_ctrl.SetItem(i, 1, item["name"])
             list_ctrl.SetItem(i, 2, item["profile"] or "")
-            list_ctrl.SetItem(i, 3, item["path"])
+            list_ctrl.SetItem(i, 3, str(item["hwnd"]))
+            list_ctrl.SetItem(i, 4, item["path"])
 
         sizer.Add(list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
 
@@ -1080,19 +1114,19 @@ class QuickLauncherFrame(wx.Frame):
             proc = (item.get("proc_name", "") or "").lower().replace(".exe", "")
             profile = (item.get("profile", "") or "").strip()
             title = (item.get("title", "") or "").strip()
+            hwnd = int(item.get("hwnd", 0) or 0)
 
             if proc in BROWSER_SET:
-                mode = "profile"
+                # 浏览器：默认用 hwnd 绑定
+                mode = "hwnd"
+                kw = profile or title[:80]
+                auto_args = ""
 
+                # 让用户可选是否补 profile 参数用于“找不到时启动”
                 ok, manual_profile = ask_profile_input(self, default_profile=profile)
-                if not ok:
-                    return
-                if not manual_profile:
-                    wx.MessageBox("浏览器建议填写 profile（例如 Profile 1 / Default）", "提示")
-                    return
-
-                kw = manual_profile
-                auto_args = build_profile_args(proc, manual_profile)
+                if ok and manual_profile:
+                    auto_args = build_profile_args(proc, manual_profile)
+                    kw = manual_profile
             else:
                 mode = "title"
                 kw = title[:80]
@@ -1104,7 +1138,9 @@ class QuickLauncherFrame(wx.Frame):
                 "args": auto_args,
                 "hotkey": "",
                 "window_keyword": kw,
-                "match_mode": mode
+                "match_mode": mode,
+                "bind_hwnd": hwnd if mode == "hwnd" else 0,
+                "profile_name": profile
             })
             self.persist()
             self.refresh_list()
@@ -1181,25 +1217,32 @@ class QuickLauncherFrame(wx.Frame):
         p = self.programs[idx]
         cur_mode = p.get("match_mode", "title")
         cur_kw = p.get("window_keyword", "")
+        cur_hwnd = int(p.get("bind_hwnd", 0) or 0)
 
-        dlg = wx.Dialog(self, title="设置关键词与匹配模式", size=(520, 220))
+        dlg = wx.Dialog(self, title="设置关键词与匹配模式", size=(560, 260))
         panel = wx.Panel(dlg)
         s = wx.BoxSizer(wx.VERTICAL)
 
         row1 = wx.BoxSizer(wx.HORIZONTAL)
         row1.Add(wx.StaticText(panel, label="匹配模式:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
-        mode_choice = wx.Choice(panel, choices=["title", "profile"])
-        mode_choice.SetStringSelection(cur_mode if cur_mode in ("title", "profile") else "title")
+        mode_choice = wx.Choice(panel, choices=["title", "profile", "hwnd"])
+        mode_choice.SetStringSelection(cur_mode if cur_mode in ("title", "profile", "hwnd") else "title")
         row1.Add(mode_choice, 0, wx.ALL, 6)
         s.Add(row1, 0, wx.EXPAND)
 
         row2 = wx.BoxSizer(wx.HORIZONTAL)
         row2.Add(wx.StaticText(panel, label="关键词:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
-        kw_ctrl = wx.TextCtrl(panel, value=cur_kw, size=(360, -1))
+        kw_ctrl = wx.TextCtrl(panel, value=cur_kw, size=(380, -1))
         row2.Add(kw_ctrl, 1, wx.ALL | wx.EXPAND, 6)
         s.Add(row2, 0, wx.EXPAND)
 
-        tip = wx.StaticText(panel, label="title=窗口标题包含；profile=浏览器用户目录名（如 Profile 1）")
+        row3 = wx.BoxSizer(wx.HORIZONTAL)
+        row3.Add(wx.StaticText(panel, label="绑定HWND:"), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
+        hwnd_ctrl = wx.TextCtrl(panel, value=str(cur_hwnd), size=(200, -1))
+        row3.Add(hwnd_ctrl, 0, wx.ALL, 6)
+        s.Add(row3, 0, wx.EXPAND)
+
+        tip = wx.StaticText(panel, label="title=标题包含；profile=Profile名；hwnd=固定窗口句柄（最稳）")
         tip.SetForegroundColour(wx.Colour(100, 100, 100))
         s.Add(tip, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
@@ -1214,8 +1257,13 @@ class QuickLauncherFrame(wx.Frame):
         panel.SetSizer(s)
 
         if dlg.ShowModal() == wx.ID_OK:
-            self.programs[idx]["match_mode"] = mode_choice.GetStringSelection() or "title"
+            m = mode_choice.GetStringSelection() or "title"
+            self.programs[idx]["match_mode"] = m
             self.programs[idx]["window_keyword"] = kw_ctrl.GetValue().strip()
+            try:
+                self.programs[idx]["bind_hwnd"] = int(hwnd_ctrl.GetValue().strip() or "0")
+            except Exception:
+                self.programs[idx]["bind_hwnd"] = 0
             self.persist()
             self.refresh_list()
             wx.MessageBox("匹配规则已保存", "成功", wx.OK | wx.ICON_INFORMATION)
