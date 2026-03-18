@@ -2,7 +2,8 @@
 """
 QuickLauncher - 浏览器多用户稳定控制版
 ★ 修复：Chrome 重启后 Profile 通过进程树回溯正确重绑
-★ 改动：取消兜底启动策略，未匹配到窗口时快捷键无响应
+★ 修改：浏览器类程序在所有模式都没匹配上时，按快捷键无任何响应（不兜底启动）
+★ 保留：非浏览器程序仍按程序名称启动
 """
 
 import wx
@@ -320,9 +321,24 @@ def make_title_signature(title: str):
 
 
 # ---------------------------
+# ★ 判断程序是否属于浏览器
+# ---------------------------
+def is_browser_program(program):
+    """根据程序路径判断是否属于浏览器"""
+    path = program.get("path", "") or ""
+    exe_name = os.path.basename(path).lower().replace(".exe", "")
+    return exe_name in BROWSER_SET
+
+
+# ---------------------------
 # ★ 浏览器主进程扫描 & 进程树回溯
 # ---------------------------
 def build_browser_main_proc_map():
+    """
+    扫描所有浏览器进程，找出主进程（命令行不含 --type= 的）。
+    返回 {pid: profile_directory}
+    无显式 --profile-directory 的主进程视为 "Default"。
+    """
     main_map = {}
     for proc in psutil.process_iter(['pid', 'name']):
         try:
@@ -333,6 +349,7 @@ def build_browser_main_proc_map():
                 cmdline = proc.cmdline()
             except (psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+            # 主浏览器进程不含 --type= 参数
             if any(a.lower().startswith('--type=') for a in cmdline):
                 continue
             profile = parse_profile_from_cmdline(proc.name(), cmdline)
@@ -345,6 +362,7 @@ def build_browser_main_proc_map():
 
 
 def get_cached_browser_main_map(max_age=3.0):
+    """带缓存的浏览器主进程映射（避免高频调用时重复扫描）"""
     global _browser_main_map_cache, _browser_main_map_ts
     now = time.time()
     if now - _browser_main_map_ts < max_age and _browser_main_map_cache:
@@ -355,6 +373,9 @@ def get_cached_browser_main_map(max_age=3.0):
 
 
 def get_profile_by_pid_tree(pid, main_map):
+    """
+    从窗口的 PID 向上遍历进程树，找到它属于哪个主浏览器进程，返回 profile。
+    """
     if pid in main_map:
         return main_map[pid]
     try:
@@ -381,6 +402,8 @@ def get_profile_by_pid_tree(pid, main_map):
 # ---------------------------
 def enum_visible_app_windows():
     windows = []
+
+    # ★ 预先构建浏览器主进程映射
     browser_main_map = get_cached_browser_main_map(max_age=2.0)
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -397,6 +420,7 @@ def enum_visible_app_windows():
 
             pn = (proc_name or "").lower().replace(".exe", "")
             if pn in BROWSER_SET:
+                # ★ 优先通过进程树回溯获取 profile
                 profile = get_profile_by_pid_tree(pid, browser_main_map)
                 if not profile:
                     profile = guess_profile(proc_name, cmdline, title)
@@ -449,6 +473,7 @@ def update_last_active_cache():
 
         exe = (os.path.basename(path) if path else proc_name or "").lower().replace(".exe", "")
         if exe in BROWSER_SET:
+            # ★ 用进程树回溯获取 profile
             browser_main_map = get_cached_browser_main_map(max_age=5.0)
             profile = get_profile_by_pid_tree(pid, browser_main_map)
             if not profile:
@@ -543,31 +568,26 @@ def find_window_for_program(program):
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best_hwnd, _ = scored[0]
 
-    # ★ 核心改动：所有模式下，如果有匹配条件但得分<=0，则不匹配
+    # ★ 浏览器类：必须有正向匹配分数，否则不返回任何窗口（不兜底）
+    if is_browser_program(program):
+        if best_score <= 0:
+            return None
+        return best_hwnd
+
+    # ★ 非浏览器类：保留原有逻辑，有关键词/profile/title_sig 但分数<=0 则不匹配
     if (keyword or profile_name or title_sig) and best_score <= 0:
         return None
-
-    # ★ 核心改动：即使没有关键词/profile/title_sig，
-    #    也不再兜底返回第一个窗口，而是返回 None
-    #    只有得分 > 0 时才返回
-    if best_score <= 0:
-        return None
-
     return best_hwnd
 
 
-# ---------------------------
-# ★ 核心改动：toggle_program 不再兜底启动程序
-# ---------------------------
 def toggle_program(program):
     """
-    仅切换已匹配到的窗口。
-    如果没有匹配到窗口，不做任何操作（不启动程序）。
-    返回 (hwnd, focused)：
-        hwnd: 匹配到的窗口句柄，None 表示未匹配
-        focused: 是否执行了切换操作
+    ★ 修改版：
+    - 浏览器类：找不到匹配窗口时不启动，直接返回 (None, False)
+    - 非浏览器类：找不到匹配窗口时按路径启动程序
     """
     path = program.get("path", "")
+    args = program.get("args", "")
     if not path:
         return None, False
 
@@ -582,7 +602,21 @@ def toggle_program(program):
             user32.SetForegroundWindow(hwnd)
         return hwnd, True
     else:
-        # ★ 不再兜底启动程序，直接返回 None
+        # ★ 浏览器类：没匹配上就不做任何事
+        if is_browser_program(program):
+            return None, False
+
+        # ★ 非浏览器类：按路径启动
+        if not os.path.exists(path):
+            wx.MessageBox(f"程序不存在：\n{path}", "错误", wx.OK | wx.ICON_ERROR)
+            return None, False
+        cmd = [path]
+        if args.strip():
+            try:
+                cmd.extend(shlex.split(args.strip(), posix=False))
+            except Exception:
+                cmd.extend(args.strip().split())
+        subprocess.Popen(cmd)
         return None, False
 
 
@@ -935,8 +969,8 @@ class QuickLauncherFrame(wx.Frame):
 
         hwnd, _focused = toggle_program(p)
 
-        # ★ 核心改动：如果没有匹配到窗口，直接返回，不做任何操作
-        if hwnd is None:
+        # ★ 浏览器类：没匹配到窗口（hwnd 为 None 且未聚焦），直接忽略，不做任何事
+        if is_browser_program(p) and hwnd is None and not _focused:
             return
 
         changed = False
