@@ -360,15 +360,17 @@ class QuickLauncherFrame(wx.Frame):
         """热键检测循环"""
         last_triggered = {}
         cooldown = 500  # 500ms冷却
+        programs = load_config()  # 只在启动时加载一次
         
         while self.running:
             now = time.time() * 1000
             
-            # 每次循环都重新加载配置
-            programs = load_config()
+            # 只在程序列表为空时重新加载
             if not programs:
-                time.sleep(0.1)
-                continue
+                programs = load_config()
+                if not programs:
+                    time.sleep(0.1)
+                    continue
             
             # 检测所有按键
             for vk, key_name in [
@@ -397,15 +399,12 @@ class QuickLauncherFrame(wx.Frame):
                     if modifiers:
                         expected = '+'.join(modifiers) + '+' + key_name
                         
-                        print(f"Pressed: {expected}")
-                        
                         # 检查冷却
                         last_time = last_triggered.get(expected, 0)
                         if now - last_time > cooldown:
                             # 匹配并触发
                             for program in programs:
                                 hotkey = program.get('hotkey', '').lower().replace(' ', '')
-                                print(f"Matching: {hotkey} == {expected} ? {hotkey == expected}")
                                 if hotkey == expected:
                                     toggle_program(program)
                                     last_triggered[expected] = now
