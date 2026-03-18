@@ -7,7 +7,7 @@ name = "QuickLauncher"
 version = "1.0.36"
 description = "Windows任务栏快捷启动器"
 authors = [
-    {name = "xinghui", email = "xinghui@example.com"}
+    {name = "laozi4vip", email = "laozi4vip@example.com"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
