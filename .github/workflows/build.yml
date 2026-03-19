@@ -91,7 +91,7 @@ jobs:
           #define MyAppExeName "${{ env.APP_NAME }}.exe"
 
           [Setup]
-          AppId={{A7E8D2D9-6A96-4F4D-9D96-6D00A9A9A001}
+          AppId={{A7E8D2D9-6A96-4F4D-9D96-6D00A9A9A001}}
           AppName={#MyAppName}
           AppVersion={#MyAppVersion}
           AppPublisher={#MyAppPublisher}
@@ -127,13 +127,16 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer/setup.iss"
 
-      # 可选签名：仅签 EXE（setup 和主程序），不签 ZIP
+      # 可选签名：通过 env 映射 secrets，避免 if 解析报错
       - name: Optional code signing (EXE only)
-        if: ${{ secrets.WIN_CERT_PFX_BASE64 != '' && secrets.WIN_CERT_PASSWORD != '' }}
+        if: ${{ env.WIN_CERT_PFX_BASE64 != '' && env.WIN_CERT_PASSWORD != '' }}
+        env:
+          WIN_CERT_PFX_BASE64: ${{ secrets.WIN_CERT_PFX_BASE64 }}
+          WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
         shell: pwsh
         run: |
           $pfxPath = "$env:RUNNER_TEMP\codesign.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String("${{ secrets.WIN_CERT_PFX_BASE64 }}"))
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WIN_CERT_PFX_BASE64))
 
           $exeTargets = @(
             "dist/${{ env.APP_NAME }}/${{ env.APP_NAME }}.exe",
@@ -143,7 +146,7 @@ jobs:
           foreach ($f in $exeTargets) {
             if (Test-Path $f) {
               & signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-                /f $pfxPath /p "${{ secrets.WIN_CERT_PASSWORD }}" "$f"
+                /f $pfxPath /p "$env:WIN_CERT_PASSWORD" "$f"
             }
           }
 
