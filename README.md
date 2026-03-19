@@ -5,7 +5,7 @@ Windows 任务栏程序快捷启动器
 
 ## 作者
 
-- **作者**：xinghui
+- **作者**：laozi4vip
 - **GitHub**：https://github.com/laozi4vip/QuickLauncher
 
 ## 功能
