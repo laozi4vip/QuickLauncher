@@ -91,7 +91,7 @@ jobs:
           #define MyAppExeName "${{ env.APP_NAME }}.exe"
 
           [Setup]
-          AppId={{A7E8D2D9-6A96-4F4D-9D96-6D00A9A9A001}}
+          AppId={{A7E8D2D9-6A96-4F4D-9D96-6D00A9A9A001}
           AppName={#MyAppName}
           AppVersion={#MyAppVersion}
           AppPublisher={#MyAppPublisher}
@@ -107,16 +107,16 @@ jobs:
           ArchitecturesInstallIn64BitMode=x64
           UninstallDisplayIcon={app}\{#MyAppExeName}
           SetupIconFile=..\main\icon.ico
-
-          [Files]
-          Source: "..\dist\${{ env.APP_NAME }}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-
+          ; 自动检测系统 UI 语言；支持中文则中文，否则回退英文
+          ShowLanguageDialog=auto
+          LanguageDetectionMethod=uilanguage
 
           [Languages]
+          Name: "english"; MessagesFile: "compiler:Default.isl"
           Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
           [Files]
-          Source: "dist\${{ env.APP_NAME }}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+          Source: "..\dist\${{ env.APP_NAME }}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
           [Icons]
           Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -131,14 +131,18 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer/setup.iss"
 
-      # 可选签名：通过 env 映射 secrets，避免 if 解析报错
+      # 可选签名：不在 if 里直接判断 secrets，避免表达式解析问题
       - name: Optional code signing (EXE only)
-        if: ${{ env.WIN_CERT_PFX_BASE64 != '' && env.WIN_CERT_PASSWORD != '' }}
         env:
           WIN_CERT_PFX_BASE64: ${{ secrets.WIN_CERT_PFX_BASE64 }}
           WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CERT_PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:WIN_CERT_PASSWORD)) {
+            Write-Host "No signing secrets provided, skip code signing."
+            exit 0
+          }
+
           $pfxPath = "$env:RUNNER_TEMP\codesign.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WIN_CERT_PFX_BASE64))
 
@@ -151,6 +155,8 @@ jobs:
             if (Test-Path $f) {
               & signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
                 /f $pfxPath /p "$env:WIN_CERT_PASSWORD" "$f"
+            } else {
+              Write-Host "Skip missing file: $f"
             }
           }
 
