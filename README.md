@@ -2,6 +2,7 @@
 
 Windows 任务栏程序快捷启动器
 
+
 ## 作者
 
 - **作者**：xinghui
@@ -36,12 +37,9 @@ pyinstaller --onefile --windowed --collect-all wx --collect-all psutil --name Qu
 
 ## 版本历史
 
-- v1.0.36 - 修复快捷键问题
-- v1.0.35 - 修复语法错误
-- v1.0.34 - 使用前台窗口检测改进切换逻辑
-- v1.0.33 - 简化窗口切换逻辑
-- v1.0.32 - 改进窗口查找和恢复逻辑
-- v1.0.31 - 修复查找窗口时同时查找最小化的窗口
+v3.0 新增窗口及任务栏图标隐藏功能
+v2.0 新增控制同浏览器多用户窗口功能，需要单独设置浏览器，以谷歌浏览器为例，多用户窗口需要绑定Profile；快捷方式添加目标: "C:\Program Files\Google\Chrome\Application\chrome.exe" --profile-directory="Profile XX" --user-data-dir="C:\Users\你的用户名\AppData\Local\Google\Chrome\XXXX"   #按实际路径修改
+v1.0 略
 
 ## 许可证
 
