@@ -1,4 +1,4 @@
-name: Build and Release (Low FP, Fixed)
+name: Build and Release (Low FP, Stable)
 
 on:
   push:
@@ -80,10 +80,23 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
-      - name: Generate Inno Setup script
+      - name: Generate Inno Setup script (auto language fallback)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path installer | Out-Null
+
+          $cnLang = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
+          if (Test-Path $cnLang) {
+            $langBlock = @'
+          Name: "english"; MessagesFile: "compiler:Default.isl"
+          Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+          '@
+          } else {
+            $langBlock = @'
+          Name: "english"; MessagesFile: "compiler:Default.isl"
+          '@
+          }
+
           @"
           #define MyAppName "${{ env.APP_NAME }}"
           #define MyAppVersion "${{ steps.ver.outputs.app_version }}"
@@ -91,7 +104,7 @@ jobs:
           #define MyAppExeName "${{ env.APP_NAME }}.exe"
 
           [Setup]
-          AppId={{A7E8D2D9-6A96-4F4D-9D96-6D00A9A9A001}
+          AppId={{A7E8D2D9-6A96-4F4D-9D96-6D00A9A9A001}}
           AppName={#MyAppName}
           AppVersion={#MyAppVersion}
           AppPublisher={#MyAppPublisher}
@@ -107,13 +120,11 @@ jobs:
           ArchitecturesInstallIn64BitMode=x64
           UninstallDisplayIcon={app}\{#MyAppExeName}
           SetupIconFile=..\main\icon.ico
-          ; 自动检测系统 UI 语言；支持中文则中文，否则回退英文
           ShowLanguageDialog=auto
           LanguageDetectionMethod=uilanguage
 
           [Languages]
-          Name: "english"; MessagesFile: "compiler:Default.isl"
-          Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+          $langBlock
 
           [Files]
           Source: "..\dist\${{ env.APP_NAME }}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -129,9 +140,16 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer/setup.iss"
+          $iscc1 = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $iscc2 = "C:\Program Files\Inno Setup 6\ISCC.exe"
+          if (Test-Path $iscc1) {
+            & $iscc1 "installer/setup.iss"
+          } elseif (Test-Path $iscc2) {
+            & $iscc2 "installer/setup.iss"
+          } else {
+            Write-Error "ISCC.exe not found."
+          }
 
-      # 可选签名：不在 if 里直接判断 secrets，避免表达式解析问题
       - name: Optional code signing (EXE only)
         env:
           WIN_CERT_PFX_BASE64: ${{ secrets.WIN_CERT_PFX_BASE64 }}
