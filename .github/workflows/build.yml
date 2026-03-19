@@ -1,4 +1,4 @@
-name: Build and Release (Low FP)
+name: Build and Release (Low FP, Fixed)
 
 on:
   push:
@@ -25,23 +25,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
+          cache: pip
 
-      - name: Resolve app version from tag
+      - name: Resolve version
         id: ver
         shell: pwsh
         run: |
           if ("${{ github.ref }}".StartsWith("refs/tags/")) {
-            $v = "${{ github.ref_name }}"
+            $v = "${{ github.ref_name }}".TrimStart("v")
           } else {
             $v = "0.0.0-dev"
           }
-          $v = $v.TrimStart("v")
-          "app_version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "app_version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "APP_VERSION=$v"
 
       - name: Upgrade pip
@@ -59,13 +58,13 @@ jobs:
             psutil==${{ env.PSUTIL_VERSION }} `
             wxpython==${{ env.WXPYTHON_VERSION }}
 
-      # 低误报建议：onedir + noupx（比 onefile 更稳）
-      - name: Build app (PyInstaller onedir, low-FP)
+      - name: Build app (onedir, low-FP)
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --windowed --onedir --noupx `
             --collect-all wx `
             --collect-all psutil `
+            --add-binary "main/icon.ico;." `
             --icon "main/icon.ico" `
             --name "${{ env.APP_NAME }}" `
             main/main.py
@@ -123,28 +122,25 @@ jobs:
           Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
           "@ | Set-Content -Path "installer/setup.iss" -Encoding UTF8
 
-      - name: Build installer (Inno Setup)
+      - name: Build installer
         shell: pwsh
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer/setup.iss"
 
-      # 可选签名：配置 Secrets 后自动生效
-      # Secrets:
-      #   WIN_CERT_PFX_BASE64  (base64后的pfx)
-      #   WIN_CERT_PASSWORD
-      - name: Optional code signing
+      # 可选签名：仅签 EXE（setup 和主程序），不签 ZIP
+      - name: Optional code signing (EXE only)
         if: ${{ secrets.WIN_CERT_PFX_BASE64 != '' && secrets.WIN_CERT_PASSWORD != '' }}
         shell: pwsh
         run: |
           $pfxPath = "$env:RUNNER_TEMP\codesign.pfx"
           [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String("${{ secrets.WIN_CERT_PFX_BASE64 }}"))
 
-          $files = @(
-            "dist/${{ env.APP_NAME }}-portable-${{ steps.ver.outputs.app_version }}-win64.zip",
+          $exeTargets = @(
+            "dist/${{ env.APP_NAME }}/${{ env.APP_NAME }}.exe",
             "dist/${{ env.APP_NAME }}-Setup-${{ steps.ver.outputs.app_version }}-win64.exe"
           )
 
-          foreach ($f in $files) {
+          foreach ($f in $exeTargets) {
             if (Test-Path $f) {
               & signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
                 /f $pfxPath /p "${{ secrets.WIN_CERT_PASSWORD }}" "$f"
@@ -182,8 +178,8 @@ jobs:
           if-no-files-found: error
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/${{ env.APP_NAME }}-portable-${{ steps.ver.outputs.app_version }}-win64.zip
