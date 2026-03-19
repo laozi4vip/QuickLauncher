@@ -142,7 +142,8 @@ def save_config(programs, autostart):
 # ---------------------------
 def normalize_hotkey(hotkey: str) -> str:
     return (hotkey or "").strip().lower().replace(" ", "")
-
+    hk = hk.replace("grave", "`").replace("tilde", "`")
+    return hk
 
 def hotkey_to_mod_vk(hotkey: str):
     hotkey = normalize_hotkey(hotkey)
@@ -158,6 +159,10 @@ def hotkey_to_mod_vk(hotkey: str):
     for i in range(1, 13):
         key_map[f"f{i}"] = 0x70 + (i - 1)
 
+    key_map["`"] = 0xC0
+    key_map["grave"] = 0xC0
+    key_map["tilde"] = 0xC0
+    
     mods = 0
     main_key = None
     for p in parts:
@@ -205,6 +210,8 @@ def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
         main_key = chr(key).lower()
     elif ord("a") <= key <= ord("z"):
         main_key = chr(key).lower()
+    elif key in (ord("`"), ord("~"), 0xC0):   # 新增
+        main_key = "`"
     else:
         return ""
     mods = []
