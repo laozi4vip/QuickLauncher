@@ -26,35 +26,64 @@ jobs:
       - name: Upgrade pip
         run: python -m pip install --upgrade pip setuptools wheel
 
-      - name: Install dependencies
+      - name: Install dependencies (pinned)
         shell: pwsh
         run: |
           if (Test-Path requirements.txt) {
             python -m pip install -r requirements.txt
           }
-          python -m pip install pyinstaller pywin32 psutil wxpython
+          python -m pip install `
+            pyinstaller==6.10.0 `
+            pywin32==306 `
+            psutil==6.0.0 `
+            wxpython==4.2.1
 
-      - name: Build EXE
+      # 推荐 onedir，误报通常低于 onefile
+      - name: Build EXE (low-FP mode)
+        shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed `
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --noupx `
             --collect-all wx `
             --collect-all psutil `
-            --add-binary "main/icon.ico:." `
+            --add-binary "main/icon.ico;." `
             --name QuickLauncher `
             main/main.py
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/QuickLauncher/*" -DestinationPath "dist/QuickLauncher-win64.zip" -Force
+
+      - name: Generate SHA256
+        shell: pwsh
+        run: |
+          Get-FileHash "dist/QuickLauncher-win64.zip" -Algorithm SHA256 | `
+            ForEach-Object { "$($_.Hash)  QuickLauncher-win64.zip" } | `
+            Out-File -Encoding ascii "dist/QuickLauncher-win64.zip.sha256"
+
+      # 可选：代码签名（需你在 repo secrets 配好证书）
+      # - name: Sign EXE (optional)
+      #   shell: pwsh
+      #   run: |
+      #     # 这里放 signtool 命令，例如：
+      #     # signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p $env:CERT_PASSWORD "dist/QuickLauncher/QuickLauncher.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: QuickLauncher
-          path: dist/QuickLauncher.exe
+          path: |
+            dist/QuickLauncher-win64.zip
+            dist/QuickLauncher-win64.zip.sha256
           if-no-files-found: error
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: dist/QuickLauncher.exe
+          files: |
+            dist/QuickLauncher-win64.zip
+            dist/QuickLauncher-win64.zip.sha256
           draft: false
           prerelease: false
           generate_release_notes: true
