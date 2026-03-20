@@ -8,7 +8,7 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 __author__ = "laozi4vip"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
 __app_name__ = "QuickLauncher"
-__version__ = "3.4"
+__version__ = "3.5"
 __description__ = "Windows 任务栏快捷启动器"
 
 import wx
