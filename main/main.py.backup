@@ -8,7 +8,7 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 __author__ = "laozi4vip"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
 __app_name__ = "QuickLauncher"
-__version__ = "最终版"
+__version__ = "3.3"
 __description__ = "Windows 任务栏快捷启动器"
 
 import wx
@@ -28,6 +28,8 @@ import time
 # Windows API & 常量
 # ---------------------------
 user32 = ctypes.windll.user32
+SW_HIDE = 0
+SW_SHOW = 5
 SW_MINIMIZE = 6
 SW_RESTORE = 9
 
@@ -38,6 +40,13 @@ MOD_WIN = 0x0008
 
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_APPWINDOW = 0x00040000
+
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
 
 RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_RUN_NAME = "QuickLauncher"
@@ -113,8 +122,10 @@ def load_config():
                 p.setdefault("profile_name", "")
                 p.setdefault("title_sig", "")
                 p.setdefault("browser_fallback_exe", False)
-                # 新增：浏览器同profile组联动开关
+                # 浏览器同profile组联动开关
                 p.setdefault("browser_group_toggle", True)
+                # 新增：热键动作 toggle/hide
+                p.setdefault("hotkey_action", "toggle")
             return {"programs": programs, "autostart": autostart}
         except Exception as e:
             print("load_config error:", e)
@@ -131,7 +142,8 @@ def save_config(programs, autostart):
 # ---------------------------
 def normalize_hotkey(hotkey: str) -> str:
     return (hotkey or "").strip().lower().replace(" ", "")
-
+    hk = hk.replace("grave", "`").replace("tilde", "`")
+    return hk
 
 def hotkey_to_mod_vk(hotkey: str):
     hotkey = normalize_hotkey(hotkey)
@@ -147,6 +159,10 @@ def hotkey_to_mod_vk(hotkey: str):
     for i in range(1, 13):
         key_map[f"f{i}"] = 0x70 + (i - 1)
 
+    key_map["`"] = 0xC0
+    key_map["grave"] = 0xC0
+    key_map["tilde"] = 0xC0
+    
     mods = 0
     main_key = None
     for p in parts:
@@ -194,6 +210,8 @@ def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
         main_key = chr(key).lower()
     elif ord("a") <= key <= ord("z"):
         main_key = chr(key).lower()
+    elif key in (ord("`"), ord("~"), 0xC0):   # 新增
+        main_key = "`"
     else:
         return ""
     mods = []
@@ -242,7 +260,7 @@ def is_alt_tab_window(hwnd):
 
 def is_hwnd_valid(hwnd: int):
     try:
-        return bool(hwnd) and bool(user32.IsWindow(hwnd)) and bool(user32.IsWindowVisible(hwnd))
+        return bool(hwnd) and bool(user32.IsWindow(hwnd))
     except Exception:
         return False
 
@@ -327,6 +345,22 @@ def make_title_signature(title: str):
     return t[:120]
 
 
+def set_window_exstyle(hwnd: int, exstyle: int):
+    try:
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, exstyle)
+        user32.SetWindowPos(
+            hwnd,
+            0,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+    except Exception:
+        pass
+
+
 # ---------------------------
 # 判断程序是否属于浏览器
 # ---------------------------
@@ -341,8 +375,11 @@ def browser_fallback_enabled(program):
 
 
 def browser_group_toggle_enabled(program):
-    # 默认开（历史配置没有字段时）
     return bool(program.get("browser_group_toggle", True))
+
+
+def is_hide_action(program):
+    return (program.get("hotkey_action", "toggle") or "toggle").strip().lower() == "hide"
 
 
 # ---------------------------
@@ -595,9 +632,6 @@ def _profile_match(target_profile: str, w_profile: str):
 
 
 def find_browser_group_windows(program):
-    """
-    返回“同一浏览器程序 + 同profile匹配”的窗口组（包含隐私窗口）
-    """
     path = program.get("path", "")
     if not path:
         return []
@@ -611,7 +645,6 @@ def find_browser_group_windows(program):
         or (program.get("window_keyword", "") or "").strip()
     )
 
-    # 先尽量按 profile 严格分组
     matched = []
     for w in cands:
         hwnd = int(w.get("hwnd", 0) or 0)
@@ -621,7 +654,6 @@ def find_browser_group_windows(program):
         if _profile_match(target_profile, w_prof):
             matched.append(w)
 
-    # 如果没配profile或没识别出profile，则退化到“按程序规则打分>0”
     if not matched:
         for w in cands:
             hwnd = int(w.get("hwnd", 0) or 0)
@@ -687,17 +719,11 @@ def launch_program_by_path(path, args):
 
 
 def toggle_program(program):
-    """
-    返回：(hwnd, acted)
-    - hwnd: 命中的窗口句柄（如有）
-    - acted: 是否执行了动作（切窗/最小化/启动）
-    """
     path = program.get("path", "")
     args = program.get("args", "")
     if not path:
         return None, False
 
-    # 浏览器且开启组联动：按组切换
     if is_browser_program(program) and browser_group_toggle_enabled(program):
         group_hwnds = find_browser_group_windows(program)
         if group_hwnds:
@@ -719,7 +745,6 @@ def toggle_program(program):
             return None, ok
         return None, False
 
-    # 其他情况：单窗口行为（包括浏览器但关闭组联动）
     hwnd = find_window_for_program(program)
     if hwnd:
         fg = user32.GetForegroundWindow()
@@ -734,7 +759,6 @@ def toggle_program(program):
                 pass
         return hwnd, True
 
-    # 浏览器单窗口没找到，按兜底策略
     if is_browser_program(program):
         if browser_fallback_enabled(program):
             ok = launch_program_by_path(path, args)
@@ -859,7 +883,7 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
 # ---------------------------
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title=f"{__app_name__} v{__version__}", size=(1140, 620))
+        super().__init__(None, title=f"{__app_name__} v{__version__}", size=(1220, 650))
 
         icon_path = get_icon_path()
         if icon_path and os.path.exists(icon_path):
@@ -877,6 +901,8 @@ class QuickLauncherFrame(wx.Frame):
         self.hotkey_id_to_index = {}
         self.registered_hotkey_ids = []
         self.exiting = False
+        # 新增：隐藏状态缓存，key=程序索引
+        self.hidden_states = {}
 
         self.init_ui()
         self.Centre()
@@ -915,14 +941,15 @@ class QuickLauncherFrame(wx.Frame):
         self.list_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
         self.list_ctrl.InsertColumn(0, "名称", width=120)
         self.list_ctrl.InsertColumn(1, "快捷键", width=120)
-        self.list_ctrl.InsertColumn(2, "模式", width=80)
-        self.list_ctrl.InsertColumn(3, "关键词", width=160)
-        self.list_ctrl.InsertColumn(4, "HWND", width=90)
-        self.list_ctrl.InsertColumn(5, "Profile", width=100)
-        self.list_ctrl.InsertColumn(6, "TitleSig", width=180)
-        self.list_ctrl.InsertColumn(7, "浏览器兜底", width=90)
-        self.list_ctrl.InsertColumn(8, "组联动", width=80)
-        self.list_ctrl.InsertColumn(9, "路径", width=300)
+        self.list_ctrl.InsertColumn(2, "动作", width=90)
+        self.list_ctrl.InsertColumn(3, "模式", width=80)
+        self.list_ctrl.InsertColumn(4, "关键词", width=150)
+        self.list_ctrl.InsertColumn(5, "HWND", width=90)
+        self.list_ctrl.InsertColumn(6, "Profile", width=100)
+        self.list_ctrl.InsertColumn(7, "TitleSig", width=160)
+        self.list_ctrl.InsertColumn(8, "浏览器兜底", width=90)
+        self.list_ctrl.InsertColumn(9, "组联动", width=80)
+        self.list_ctrl.InsertColumn(10, "路径", width=280)
         root.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
 
         row = wx.BoxSizer(wx.HORIZONTAL)
@@ -960,10 +987,12 @@ class QuickLauncherFrame(wx.Frame):
         for p in self.programs:
             fb = "是" if p.get("browser_fallback_exe", False) else "否"
             gt = "是" if p.get("browser_group_toggle", True) else "否"
+            act = "隐藏/恢复" if is_hide_action(p) else "切换/启动"
             self.list_ctrl.Append(
                 [
                     p.get("name", ""),
                     p.get("hotkey", ""),
+                    act,
                     p.get("match_mode", "title"),
                     p.get("window_keyword", ""),
                     str(int(p.get("bind_hwnd", 0) or 0)),
@@ -990,6 +1019,7 @@ class QuickLauncherFrame(wx.Frame):
 
     def on_close(self, event):
         if self.exiting:
+            self.restore_all_hidden_windows()
             self.unregister_all_hotkeys()
             if self.taskbar:
                 self.taskbar.RemoveIcon()
@@ -1063,6 +1093,78 @@ class QuickLauncherFrame(wx.Frame):
             return
         self.persist()
         wx.MessageBox("设置已保存", "成功")
+
+    # ---- 隐藏/恢复窗口（含任务栏图标）----
+    def _hide_window_and_taskbar(self, hwnd: int):
+        if not is_hwnd_valid(hwnd):
+            return None
+        old_ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        new_ex = (old_ex | WS_EX_TOOLWINDOW) & (~WS_EX_APPWINDOW)
+        set_window_exstyle(hwnd, new_ex)
+        user32.ShowWindow(hwnd, SW_HIDE)
+        return {"hwnd": int(hwnd), "exstyle": int(old_ex)}
+
+    def _restore_window_and_taskbar(self, item):
+        hwnd = int(item.get("hwnd", 0) or 0)
+        if not is_hwnd_valid(hwnd):
+            return False
+        old_ex = int(item.get("exstyle", 0))
+        set_window_exstyle(hwnd, old_ex)
+        user32.ShowWindow(hwnd, SW_SHOW)
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        return True
+
+    def restore_all_hidden_windows(self):
+        keys = list(self.hidden_states.keys())
+        for k in keys:
+            state = self.hidden_states.get(k, {})
+            items = state.get("items", [])
+            for it in items:
+                self._restore_window_and_taskbar(it)
+        self.hidden_states.clear()
+
+    def toggle_hide_for_program(self, idx, p):
+        key = int(idx)
+        state = self.hidden_states.get(key)
+
+        # 已隐藏 -> 恢复
+        if state:
+            items = state.get("items", [])
+            restored_any = False
+            for it in items:
+                if self._restore_window_and_taskbar(it):
+                    restored_any = True
+            if restored_any and items:
+                try:
+                    user32.SetForegroundWindow(int(items[0].get("hwnd", 0) or 0))
+                except Exception:
+                    pass
+            self.hidden_states.pop(key, None)
+            return None, restored_any
+
+        # 未隐藏 -> 先找窗口
+        hwnds = []
+        if is_browser_program(p) and browser_group_toggle_enabled(p):
+            hwnds = find_browser_group_windows(p)
+        else:
+            h = find_window_for_program(p)
+            if h:
+                hwnds = [h]
+
+        if not hwnds:
+            return None, False
+
+        hidden_items = []
+        for h in hwnds:
+            it = self._hide_window_and_taskbar(h)
+            if it:
+                hidden_items.append(it)
+
+        if not hidden_items:
+            return None, False
+
+        self.hidden_states[key] = {"items": hidden_items}
+        return hidden_items[0]["hwnd"], True
 
     # ---- 自动补绑逻辑 ----
     def get_used_hwnds_by_same_path(self, path, exclude_index=None):
@@ -1198,6 +1300,17 @@ class QuickLauncherFrame(wx.Frame):
         if idx is None or idx >= len(self.programs):
             return
         p = self.programs[idx]
+
+        # 新增动作：隐藏/恢复（窗口+任务栏图标）
+        if is_hide_action(p):
+            hwnd, acted = self.toggle_hide_for_program(idx, p)
+            if acted:
+                if idx in self.hidden_states:
+                    self.update_status(f"已隐藏：{p.get('name', '')}")
+                else:
+                    self.update_status(f"已恢复：{p.get('name', '')}")
+            return
+
         mode = (p.get("match_mode", "title") or "title").lower()
         old_hwnd = int(p.get("bind_hwnd", 0) or 0)
 
@@ -1207,7 +1320,6 @@ class QuickLauncherFrame(wx.Frame):
 
         hwnd, acted = toggle_program(p)
 
-        # 浏览器没动作（且不开EXE兜底时）直接返回
         if is_browser_program(p) and not acted:
             return
 
@@ -1235,7 +1347,7 @@ class QuickLauncherFrame(wx.Frame):
 
     # ---- 添加/编辑 ----
     def on_manual_add(self, _):
-        dlg = wx.Dialog(self, title="手动添加", size=(780, 500))
+        dlg = wx.Dialog(self, title="手动添加", size=(800, 560))
         panel = wx.Panel(dlg)
         s = wx.BoxSizer(wx.VERTICAL)
 
@@ -1248,6 +1360,8 @@ class QuickLauncherFrame(wx.Frame):
         name = wx.TextCtrl(panel)
         path = wx.TextCtrl(panel)
         args = wx.TextCtrl(panel)
+        action = wx.Choice(panel, choices=["切换/启动", "隐藏/恢复（窗口+任务栏图标）"])
+        action.SetStringSelection("切换/启动")
         mode = wx.Choice(panel, choices=["title", "profile", "hwnd"])
         mode.SetStringSelection("title")
         kw = wx.TextCtrl(panel)
@@ -1262,6 +1376,7 @@ class QuickLauncherFrame(wx.Frame):
         row("名称:", name)
         row("路径:", path)
         row("启动参数:", args)
+        row("热键动作:", action)
         row("模式:", mode)
         row("关键词:", kw)
         row("HWND:", hwnd)
@@ -1323,6 +1438,7 @@ class QuickLauncherFrame(wx.Frame):
                 "title_sig": "",
                 "browser_fallback_exe": bool(fallback_cb.GetValue()),
                 "browser_group_toggle": bool(group_toggle_cb.GetValue()),
+                "hotkey_action": "hide" if action.GetStringSelection().startswith("隐藏/恢复") else "toggle",
             }
 
             if not p["name"] or not p["path"]:
@@ -1428,6 +1544,7 @@ class QuickLauncherFrame(wx.Frame):
                     "title_sig": it.get("title_sig", ""),
                     "browser_fallback_exe": fallback,
                     "browser_group_toggle": group_toggle,
+                    "hotkey_action": "toggle",
                 }
             )
             self.persist()
@@ -1451,6 +1568,7 @@ class QuickLauncherFrame(wx.Frame):
         if idx < 0:
             wx.MessageBox("请先选择", "提示")
             return
+        self.hidden_states.pop(int(idx), None)
         self.programs.pop(idx)
         self.persist()
         self.refresh_list()
@@ -1490,9 +1608,12 @@ class QuickLauncherFrame(wx.Frame):
             wx.MessageBox("请先选择程序", "提示")
             return
         p = self.programs[idx]
-        dlg = wx.Dialog(self, title="设置匹配", size=(660, 460))
+        dlg = wx.Dialog(self, title="设置匹配", size=(680, 520))
         panel = wx.Panel(dlg)
         s = wx.BoxSizer(wx.VERTICAL)
+
+        action = wx.Choice(panel, choices=["切换/启动", "隐藏/恢复（窗口+任务栏图标）"])
+        action.SetStringSelection("隐藏/恢复（窗口+任务栏图标）" if is_hide_action(p) else "切换/启动")
 
         mode = wx.Choice(panel, choices=["title", "profile", "hwnd"])
         mode.SetStringSelection(p.get("match_mode", "title"))
@@ -1512,6 +1633,7 @@ class QuickLauncherFrame(wx.Frame):
         group_toggle_cb.Enable(is_b)
 
         for lab, ctrl in [
+            ("热键动作:", action),
             ("模式:", mode),
             ("关键词:", kw),
             ("绑定HWND:", hwnd),
@@ -1540,6 +1662,7 @@ class QuickLauncherFrame(wx.Frame):
         panel.SetSizer(s)
 
         if dlg.ShowModal() == wx.ID_OK:
+            p["hotkey_action"] = "hide" if action.GetStringSelection().startswith("隐藏/恢复") else "toggle"
             p["match_mode"] = mode.GetStringSelection() or "title"
             p["window_keyword"] = kw.GetValue().strip()
             p["profile_name"] = prof.GetValue().strip()
