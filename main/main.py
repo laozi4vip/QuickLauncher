@@ -311,6 +311,34 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
                 return os.path.basename(p.rstrip("\\/"))
     return ""
 
+def parse_profile_from_cwd(pid):
+    """
+    优先从进程当前工作目录推断 profile（Chrome/Edge/Brave/Chromium/Firefox）
+    例如:
+      C:\\Users\\xxx\\AppData\\Local\\Google\\Chrome\\User Data\\Profile xx
+      C:\\Users\\xxx\\AppData\\Local\\Google\\Chrome\\User Data\\Default
+    """
+    try:
+        p = psutil.Process(pid)
+        cwd = p.cwd() or ""
+    except Exception:
+        return ""
+
+    if not cwd:
+        return ""
+
+    c = cwd.replace("/", "\\").rstrip("\\")
+    base = os.path.basename(c)
+    if re.match(r"(?i)^profile\s*\d+$", base):
+        # 统一成 Profile N 格式
+        n = re.findall(r"\d+", base)[0]
+        return f"Profile {n}"
+    if base.lower() in ("default", "guest", "personal", "work"):
+        return base.capitalize()
+
+    # 有些情况下 cwd 在 User Data 根目录，取不到具体 profile
+    return ""
+
 
 def parse_profile_from_title(proc_name: str, title: str):
     name = (proc_name or "").lower().replace(".exe", "")
@@ -327,11 +355,21 @@ def parse_profile_from_title(proc_name: str, title: str):
     return ""
 
 
-def guess_profile(proc_name: str, cmdline_list, title: str):
+def guess_profile(proc_name: str, cmdline_list, title: str, pid: int = 0):
+    # 1) cwd 优先
+    if pid:
+        p0 = parse_profile_from_cwd(pid)
+        if p0:
+            return p0
+
+    # 2) cmdline
     p1 = parse_profile_from_cmdline(proc_name, cmdline_list)
     if p1:
         return p1
+
+    # 3) title 兜底
     return parse_profile_from_title(proc_name, title)
+
 
 
 def make_title_signature(title: str):
@@ -398,7 +436,9 @@ def build_browser_main_proc_map():
                 continue
             if any(a.lower().startswith("--type=") for a in cmdline):
                 continue
-            profile = parse_profile_from_cmdline(proc.name(), cmdline)
+            profile = parse_profile_from_cwd(proc.pid)
+            if not profile:
+                profile = parse_profile_from_cmdline(proc.name(), cmdline)
             if not profile:
                 profile = "Default"
             main_map[proc.pid] = profile
@@ -462,9 +502,9 @@ def enum_visible_app_windows():
             if pn in BROWSER_SET:
                 profile = get_profile_by_pid_tree(pid, browser_main_map)
                 if not profile:
-                    profile = guess_profile(proc_name, cmdline, title)
+                    profile = guess_profile(proc_name, cmdline, title, pid)
             else:
-                profile = guess_profile(proc_name, cmdline, title)
+                profile = guess_profile(proc_name, cmdline, title, pid)
 
             windows.append(
                 {
@@ -476,8 +516,10 @@ def enum_visible_app_windows():
                     "proc_name": proc_name,
                     "cmdline": cmdline,
                     "profile": profile,
+                    "profile_norm": _normalize_profile_text(profile),
                 }
             )
+            
         except Exception:
             pass
         return True
@@ -517,7 +559,7 @@ def update_last_active_cache():
             browser_main_map = get_cached_browser_main_map(max_age=5.0)
             profile = get_profile_by_pid_tree(pid, browser_main_map)
             if not profile:
-                profile = guess_profile(proc_name, cmdline, title)
+                profile = guess_profile(proc_name, cmdline, title, pid)
             if profile:
                 LAST_ACTIVE_PROFILE_HWND[(exe, profile.strip().lower())] = (int(hwnd), time.time())
     except Exception:
