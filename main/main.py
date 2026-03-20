@@ -341,17 +341,20 @@ def parse_profile_from_cwd(pid):
 
 
 def parse_profile_from_title(proc_name: str, title: str):
-    name = (proc_name or "").lower().replace(".exe", "")
     t = (title or "").strip()
     if not t:
         return ""
-    m = re.search(r"\b(Profile\s*\d+|Default|Personal|Work|Guest)\b", t, re.IGNORECASE)
+
+    # 优先匹配括号里的 Profile，比如: xxx - Google Chrome (Profile 2)
+    m = re.search(r"\((profile\s*\d+|default|personal|work|guest)\)", t, re.IGNORECASE)
     if m:
         return m.group(1).strip()
-    if name == "firefox":
-        m2 = re.search(r"\b(Profile\s*\d+|Default)\b", t, re.IGNORECASE)
-        if m2:
-            return m2.group(1).strip()
+
+    # 再匹配独立词
+    m2 = re.search(r"\b(profile\s*\d+|default|personal|work|guest)\b", t, re.IGNORECASE)
+    if m2:
+        return m2.group(1).strip()
+
     return ""
 
 
@@ -588,6 +591,25 @@ def score_window_for_program(program, w):
     w_title = (w.get("title", "") or "").lower()
     w_sig = (w.get("title_sig", "") or "").lower()
     w_prof = _normalize_profile_text(w.get("profile", ""))
+# 关键补强：直接从当前窗口进程命令行再提取一次 profile
+    w_cmd_prof = _normalize_profile_text(
+        parse_profile_from_cmdline(w.get("proc_name", ""), w.get("cmdline", []))
+    )
+    if not w_cmd_prof:
+        # 再尝试从标题取
+        w_cmd_prof = _normalize_profile_text(
+            parse_profile_from_title(w.get("proc_name", ""), w.get("title", ""))
+        )
+    
+    # 如果程序配置了 profile_name，命令行命中给高分
+    if profile_name and w_cmd_prof:
+        if w_cmd_prof == profile_name:
+            score += 140
+        elif profile_name in w_cmd_prof or w_cmd_prof in profile_name:
+            score += 90
+            
+    if w_prof and w_cmd_prof and w_prof == w_cmd_prof:
+        score += 20
 
     if keyword and w_prof:
         if w_prof == keyword:
@@ -649,10 +671,9 @@ def find_window_for_program(program):
         scored.append((s, int(w["hwnd"]), w))
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best_hwnd, _ = scored[0]
-
+    
     if is_browser_program(program):
-        if best_score <= 0:
-            return None
+        # 浏览器放宽：有候选就返回最佳，避免 profile 猜测失败导致完全不可控
         return best_hwnd
 
     if (keyword or profile_name or title_sig) and best_score <= 0:
@@ -667,9 +688,12 @@ def _normalize_profile_text(s: str):
     t = (s or "").strip().lower()
     if not t:
         return ""
-    t = t.replace("　", " ")           # 全角空格
-    t = re.sub(r"\s+", " ", t)         # 多空格压成1个
-    t = re.sub(r"^profile\s*(\d+)$", r"profile \1", t)  # profile1 -> profile 1
+    t = t.replace("　", " ")
+    t = re.sub(r"\s+", " ", t)
+    t = t.replace("-", " ")
+    t = re.sub(r"^profile\s*(\d+)$", r"profile \1", t)   # profile1 -> profile 1
+    if t == "default profile":
+        t = "default"
     return t
 
 def _profile_match(target_profile: str, w_profile: str):
