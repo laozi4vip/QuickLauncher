@@ -71,6 +71,14 @@ _browser_main_map_ts = 0.0
 _wmi_proc_cache = {}
 _wmi_proc_cache_ts = 0.0
 _wmi_lock = threading.Lock()
+# ---------------------------
+# 调试开关
+# ---------------------------
+DEBUG = False  # True=开启调试日志，False=关闭
+
+def dprint(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs)
 
 
 # ---------------------------
@@ -843,8 +851,8 @@ def find_browser_group_windows(program):
         or (program.get("window_keyword", "") or "").strip()
     )
 
-    print("[DBG] target_profile=", target_profile, 
-          " normalized=", _normalize_profile_text(target_profile))
+    dprint("[DBG] target_profile=", target_profile, 
+           " normalized=", _normalize_profile_text(target_profile))
 
     matched = []
     for w in cands:
@@ -853,9 +861,9 @@ def find_browser_group_windows(program):
             continue
 
         w_prof = (w.get("profile", "") or "").strip()
-        print("[DBG] window_profile=", w_prof,
-              " normalized=", _normalize_profile_text(w_prof))
-        print("[DBG] match=", _profile_match(target_profile, w_prof))
+            dprint("[DBG] window_profile=", w_prof,
+                   " normalized=", _normalize_profile_text(w_prof))
+            dprint("[DBG] match=", _profile_match(target_profile, w_prof))
 
         if _profile_match(target_profile, w_prof):
             matched.append(w)
