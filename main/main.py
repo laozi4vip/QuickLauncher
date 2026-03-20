@@ -692,8 +692,9 @@ def find_window_for_program(program):
     best_score, best_hwnd, _ = scored[0]
     
     if is_browser_program(program):
-        # 浏览器放宽：有候选就返回最佳，避免 profile 猜测失败导致完全不可控
-        return best_hwnd
+        if best_score > 0:
+            return best_hwnd
+        return None
 
     if (keyword or profile_name or title_sig) and best_score <= 0:
         return None
@@ -1296,72 +1297,72 @@ class QuickLauncherFrame(wx.Frame):
                 used.add(h)
         return used
 
-def auto_bind_program_if_needed(self, idx, windows_cache=None, save=False):
-    if idx < 0 or idx >= len(self.programs):
-        return False
-    p = self.programs[idx]
-    if (p.get("match_mode", "title") or "title").lower() != "hwnd":
-        return False
-
-    current = int(p.get("bind_hwnd", 0) or 0)
-    path = p.get("path", "")
-    if not path:
-        return False
-
-    if current and is_hwnd_valid(current):
-        pid = get_pid_from_hwnd(current)
-        cpath, _, _ = get_proc_path_name_cmdline(pid)
-        if os.path.normcase(cpath or "") == os.path.normcase(path or ""):
+    def auto_bind_program_if_needed(self, idx, windows_cache=None, save=False):
+        if idx < 0 or idx >= len(self.programs):
             return False
-
-    cands = windows_cache if windows_cache is not None else enum_windows_for_program(path)
-    if not cands:
-        return False
-
-    used = self.get_used_hwnds_by_same_path(path, exclude_index=idx)
-    scored = []
-
-    target_pf = _normalize_profile_text(p.get("profile_name", ""))
-
-    for w in cands:
-        hwnd = int(w.get("hwnd", 0) or 0)
-        if not hwnd or hwnd in used or not is_hwnd_valid(hwnd):
-            continue
-
-        # ===== 新增：profile_name 硬过滤（防跨profile误绑）=====
-        if target_pf:
-            w_pf = _normalize_profile_text(w.get("profile", ""))
-            w_cmd_pf = _normalize_profile_text(
-                parse_profile_from_cmdline(w.get("proc_name", ""), w.get("cmdline", []))
-            )
-            w_t_pf = _normalize_profile_text(
-                parse_profile_from_title(w.get("proc_name", ""), w.get("title", ""))
-            )
-            if not any(_profile_match(target_pf, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x):
+        p = self.programs[idx]
+        if (p.get("match_mode", "title") or "title").lower() != "hwnd":
+            return False
+    
+        current = int(p.get("bind_hwnd", 0) or 0)
+        path = p.get("path", "")
+        if not path:
+            return False
+    
+        if current and is_hwnd_valid(current):
+            pid = get_pid_from_hwnd(current)
+            cpath, _, _ = get_proc_path_name_cmdline(pid)
+            if os.path.normcase(cpath or "") == os.path.normcase(path or ""):
+                return False
+    
+        cands = windows_cache if windows_cache is not None else enum_windows_for_program(path)
+        if not cands:
+            return False
+    
+        used = self.get_used_hwnds_by_same_path(path, exclude_index=idx)
+        scored = []
+    
+        target_pf = _normalize_profile_text(p.get("profile_name", ""))
+    
+        for w in cands:
+            hwnd = int(w.get("hwnd", 0) or 0)
+            if not hwnd or hwnd in used or not is_hwnd_valid(hwnd):
                 continue
-        # ====================================================
-
-        s = score_window_for_program(p, w)
-        scored.append((s, hwnd, w))
-
-    if not scored:
-        return False
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    best_score, best_hwnd, best_w = scored[0]
-
-    kw = (p.get("window_keyword", "") or "").strip()
-    pf = (p.get("profile_name", "") or "").strip()
-    ts = (p.get("title_sig", "") or "").strip()
-    if (kw or pf or ts) and best_score <= 0:
-        return False
-
-    p["bind_hwnd"] = int(best_hwnd)
-    if not (p.get("title_sig", "") or "").strip():
-        p["title_sig"] = best_w.get("title_sig", "") or make_title_signature(best_w.get("title", ""))
-    if save:
-        self.persist()
-    return True
+    
+            # ===== 新增：profile_name 硬过滤（防跨profile误绑）=====
+            if target_pf:
+                w_pf = _normalize_profile_text(w.get("profile", ""))
+                w_cmd_pf = _normalize_profile_text(
+                    parse_profile_from_cmdline(w.get("proc_name", ""), w.get("cmdline", []))
+                )
+                w_t_pf = _normalize_profile_text(
+                    parse_profile_from_title(w.get("proc_name", ""), w.get("title", ""))
+                )
+                if not any(_profile_match(target_pf, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x):
+                    continue
+            # ====================================================
+    
+            s = score_window_for_program(p, w)
+            scored.append((s, hwnd, w))
+    
+        if not scored:
+            return False
+    
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_hwnd, best_w = scored[0]
+    
+        kw = (p.get("window_keyword", "") or "").strip()
+        pf = (p.get("profile_name", "") or "").strip()
+        ts = (p.get("title_sig", "") or "").strip()
+        if (kw or pf or ts) and best_score <= 0:
+            return False
+    
+        p["bind_hwnd"] = int(best_hwnd)
+        if not (p.get("title_sig", "") or "").strip():
+            p["title_sig"] = best_w.get("title_sig", "") or make_title_signature(best_w.get("title", ""))
+        if save:
+            self.persist()
+        return True
 
 
     def auto_bind_unbound_same_browser(self, base_index):
