@@ -141,7 +141,7 @@ def save_config(programs, autostart):
 # 热键工具
 # ---------------------------
 def normalize_hotkey(hotkey: str) -> str:
-    return (hotkey or "").strip().lower().replace(" ", "")
+    hk = (hotkey or "").strip().lower().replace(" ", "")
     hk = hk.replace("grave", "`").replace("tilde", "`")
     return hk
 
@@ -539,13 +539,13 @@ def build_profile_args(proc_name: str, profile: str):
 def score_window_for_program(program, w):
     score = 0
     keyword = (program.get("window_keyword", "") or "").strip().lower()
-    profile_name = (program.get("profile_name", "") or "").strip().lower()
+    profile_name = _normalize_profile_text(program.get("profile_name", ""))
     title_sig = (program.get("title_sig", "") or "").strip().lower()
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
 
     w_title = (w.get("title", "") or "").lower()
     w_sig = (w.get("title_sig", "") or "").lower()
-    w_prof = (w.get("profile", "") or "").strip().lower()
+    w_prof = _normalize_profile_text(w.get("profile", ""))
 
     if keyword and w_prof:
         if w_prof == keyword:
@@ -586,10 +586,10 @@ def find_window_for_program(program):
         return None
 
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
-    keyword = (program.get("window_keyword", "") or "").strip().lower()
+    keyword = _normalize_profile_text(program.get("window_keyword", ""))
     bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
     title_sig = (program.get("title_sig", "") or "").strip().lower()
-    profile_name = (program.get("profile_name", "") or "").strip().lower()
+    profile_name = _normalize_profile_text(program.get("profile_name", ""))
 
     if match_mode == "hwnd" and bind_hwnd and is_hwnd_valid(bind_hwnd):
         pid = get_pid_from_hwnd(bind_hwnd)
@@ -621,14 +621,22 @@ def find_window_for_program(program):
 # ---------------------------
 # 浏览器同 Profile 组窗口查找 & 批量切换
 # ---------------------------
+def _normalize_profile_text(s: str):
+    t = (s or "").strip().lower()
+    if not t:
+        return ""
+    t = t.replace("　", " ")           # 全角空格
+    t = re.sub(r"\s+", " ", t)         # 多空格压成1个
+    t = re.sub(r"^profile\s*(\d+)$", r"profile \1", t)  # profile1 -> profile 1
+    return t
+
 def _profile_match(target_profile: str, w_profile: str):
-    tp = (target_profile or "").strip().lower()
-    wp = (w_profile or "").strip().lower()
-    if not tp:
-        return False
-    if not wp:
+    tp = _normalize_profile_text(target_profile)
+    wp = _normalize_profile_text(w_profile)
+    if not tp or not wp:
         return False
     return wp == tp or (tp in wp) or (wp in tp)
+
 
 
 def find_browser_group_windows(program):
