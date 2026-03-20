@@ -684,26 +684,34 @@ def score_window_for_program(program, w):
     w_sig = (w.get("title_sig", "") or "").lower()
     w_prof = (w.get("profile", "") or "").strip().lower()
 
-    if keyword and w_prof:
-        if w_prof == keyword:
+    if match_mode == "profile":
+        target = profile_name or keyword
+        if target and w_prof:
+            if w_prof == target:
+                score += 120
+            elif target in w_prof or w_prof in target:
+                score += 90
+        if title_sig and w_sig:
+            if w_sig == title_sig:
+                score += 20
+            elif title_sig in w_sig or w_sig in title_sig:
+                score += 10
+
+    elif match_mode == "title":
+        if keyword and keyword in w_title:
             score += 120
-        elif keyword in w_prof:
-            score += 90
+        if title_sig and w_sig:
+            if w_sig == title_sig:
+                score += 40
+            elif title_sig in w_sig or w_sig in title_sig:
+                score += 20
 
-    if profile_name and w_prof:
-        if w_prof == profile_name:
-            score += 100
-        elif profile_name in w_prof:
-            score += 70
-
-    if title_sig and w_sig:
-        if w_sig == title_sig:
-            score += 60
-        elif title_sig in w_sig or w_sig in title_sig:
-            score += 35
-
-    if match_mode == "title" and keyword and keyword in w_title:
-        score += 80
+    else:  # hwnd 或其他
+        if title_sig and w_sig:
+            if w_sig == title_sig:
+                score += 50
+            elif title_sig in w_sig or w_sig in title_sig:
+                score += 25
 
     hwnd = int(w.get("hwnd", 0) or 0)
     if hwnd == user32.GetForegroundWindow():
@@ -712,6 +720,7 @@ def score_window_for_program(program, w):
         score += 10
 
     return score
+
 
 
 # ---------------------------
@@ -738,8 +747,28 @@ def find_window_for_program(program):
     if not candidates:
         return None
 
+    # ===== 按模式先过滤，避免“全都按 profile 命中” =====
+    filtered = candidates
+
+    if match_mode == "title":
+        if keyword:
+            filtered = [w for w in candidates if keyword in (w.get("title", "") or "").lower()]
+    elif match_mode == "profile":
+        target = (profile_name or keyword).strip().lower()
+        if target:
+            filtered = [
+                w for w in candidates
+                if _profile_match(target, (w.get("profile", "") or ""))
+            ]
+    elif match_mode == "hwnd":
+        # hwnd 模式优先 bind_hwnd，前面已处理；这里仅做兜底打分
+        pass
+
+    if not filtered:
+        return None
+
     scored = []
-    for w in candidates:
+    for w in filtered:
         s = score_window_for_program(program, w)
         scored.append((s, int(w["hwnd"]), w))
     scored.sort(key=lambda x: x[0], reverse=True)
