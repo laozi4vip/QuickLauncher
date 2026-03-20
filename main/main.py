@@ -405,7 +405,12 @@ def parse_profile_from_title(proc_name: str, title: str):
     t = (title or "").strip()
     if not t:
         return ""
-    m = re.search(r"\b(Profile\s*\d+|Default|Personal|Work|Guest)\b", t, re.IGNORECASE)
+    m = re.search(r"\b(profile\s*\d+|default|personal|work|guest)\b", t, re.IGNORECASE)
+    if m:
+        v = m.group(1).strip()
+        v = re.sub(r"\bprofile\s*(\d+)\b", r"Profile \1", v, flags=re.IGNORECASE)
+        return v
+
     if m:
         return m.group(1).strip()
     if name == "firefox":
@@ -787,14 +792,23 @@ def find_window_for_program(program):
 # ---------------------------
 # 浏览器同 Profile 组窗口查找 & 批量切换
 # ---------------------------
+def _normalize_profile_text(s: str) -> str:
+    s = (s or "").strip().lower()
+    if not s:
+        return ""
+    s = re.sub(r"\s+", " ", s)
+    # 统一 profile + 数字 的写法：profile16 -> profile 16
+    s = re.sub(r"\bprofile\s*(\d+)\b", r"profile \1", s, flags=re.IGNORECASE)
+    return s
+
+
 def _profile_match(target_profile: str, w_profile: str):
-    tp = (target_profile or "").strip().lower()
-    wp = (w_profile or "").strip().lower()
-    if not tp:
-        return False
-    if not wp:
+    tp = _normalize_profile_text(target_profile)
+    wp = _normalize_profile_text(w_profile)
+    if not tp or not wp:
         return False
     return wp == tp or (tp in wp) or (wp in tp)
+
 
 
 def find_browser_group_windows(program):
