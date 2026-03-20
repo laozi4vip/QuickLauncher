@@ -23,6 +23,7 @@ import winreg
 import shlex
 import re
 import time
+import threading
 
 # ---------------------------
 # Windows API & 常量
@@ -67,6 +68,9 @@ LAST_ACTIVE_PROFILE_HWND = {}
 
 _browser_main_map_cache = {}
 _browser_main_map_ts = 0.0
+_wmi_proc_cache = {}
+_wmi_proc_cache_ts = 0.0
+_wmi_lock = threading.Lock()
 
 
 # ---------------------------
@@ -141,9 +145,10 @@ def save_config(programs, autostart):
 # 热键工具
 # ---------------------------
 def normalize_hotkey(hotkey: str) -> str:
-    return (hotkey or "").strip().lower().replace(" ", "")
+    hk = (hotkey or "").strip().lower().replace(" ", "")
     hk = hk.replace("grave", "`").replace("tilde", "`")
     return hk
+
 
 def hotkey_to_mod_vk(hotkey: str):
     hotkey = normalize_hotkey(hotkey)
@@ -278,6 +283,67 @@ def get_proc_path_name_cmdline(pid):
     except Exception:
         return "", "", []
 
+def _wmi_escape_pid_query():
+    # 这里保持简单，按 PID 精确查
+    return r"wmic process get ProcessId,CommandLine,ExecutablePath /FORMAT:CSV"
+
+
+def _refresh_wmi_proc_cache(max_age=2.0):
+    global _wmi_proc_cache, _wmi_proc_cache_ts
+    now = time.time()
+    with _wmi_lock:
+        if now - _wmi_proc_cache_ts < max_age and _wmi_proc_cache:
+            return _wmi_proc_cache
+
+        cache = {}
+        try:
+            # 用 powershell 获取更稳定（中文系统也更稳）
+            ps_cmd = [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-Command",
+                "Get-CimInstance Win32_Process | "
+                "Select-Object ProcessId,ExecutablePath,CommandLine | "
+                "ConvertTo-Json -Compress"
+            ]
+            out = subprocess.check_output(ps_cmd, creationflags=0x08000000)  # CREATE_NO_WINDOW
+            txt = out.decode("utf-8", errors="ignore").strip()
+            if txt:
+                data = json.loads(txt)
+                if isinstance(data, dict):
+                    data = [data]
+                for it in data:
+                    try:
+                        pid = int(it.get("ProcessId", 0) or 0)
+                        if pid <= 0:
+                            continue
+                        exe = (it.get("ExecutablePath") or "").strip()
+                        cmd = (it.get("CommandLine") or "").strip()
+                        cache[pid] = {"exe": exe, "cmd": cmd}
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        _wmi_proc_cache = cache
+        _wmi_proc_cache_ts = now
+        return _wmi_proc_cache
+
+
+def get_proc_exe_cmdline_wmi(pid: int):
+    cache = _refresh_wmi_proc_cache(max_age=2.0)
+    item = cache.get(int(pid), {})
+    exe = item.get("exe", "") or ""
+    cmd = item.get("cmd", "") or ""
+    cmd_list = []
+    if cmd:
+        try:
+            cmd_list = shlex.split(cmd, posix=False)
+        except Exception:
+            cmd_list = cmd.split()
+    return exe, cmd_list
+
 
 def parse_profile_from_cmdline(proc_name: str, cmdline_list):
     name = (proc_name or "").lower().replace(".exe", "")
@@ -309,6 +375,28 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
             if la == "-profile" and i + 1 < len(args):
                 p = (args[i + 1] or "").strip().strip('"')
                 return os.path.basename(p.rstrip("\\/"))
+    return ""
+
+def parse_profile_from_userdata_dir(cmdline_list):
+    args = cmdline_list or []
+
+    def value_after(prefix):
+        for i, a in enumerate(args):
+            la = (a or "").lower()
+            if la.startswith(prefix + "="):
+                return a.split("=", 1)[1].strip().strip('"')
+            if la == prefix and i + 1 < len(args):
+                return (args[i + 1] or "").strip().strip('"')
+        return ""
+
+    udd = value_after("--user-data-dir")
+    if not udd:
+        return ""
+
+    # 常见路径: ...\User Data\Profile 16 或 ...\User Data\Default
+    base = os.path.basename(udd.rstrip("\\/"))
+    if base:
+        return base
     return ""
 
 
@@ -438,6 +526,50 @@ def get_profile_by_pid_tree(pid, main_map):
         pass
     return ""
 
+def get_profile_by_pid_tree_strict(pid, max_depth=20):
+    """
+    比原 get_profile_by_pid_tree 更严格：
+    1) 先看该 pid 的 WMI cmdline（可含 --profile-directory / --user-data-dir）
+    2) 再逐级父进程
+    3) 最后回退 psutil cmdline/title 逻辑
+    """
+    visited = set()
+    cur_pid = int(pid)
+
+    for _ in range(max_depth):
+        if cur_pid <= 0 or cur_pid in visited:
+            break
+        visited.add(cur_pid)
+
+        # 1) WMI 读取
+        exe_wmi, cmd_wmi = get_proc_exe_cmdline_wmi(cur_pid)
+        proc_name = os.path.basename(exe_wmi) if exe_wmi else ""
+
+        p = parse_profile_from_cmdline(proc_name, cmd_wmi)
+        if p:
+            return p
+
+        p2 = parse_profile_from_userdata_dir(cmd_wmi)
+        if p2:
+            return p2
+
+        # 2) psutil 兜底
+        ppath, pname, pcmd = get_proc_path_name_cmdline(cur_pid)
+        p3 = parse_profile_from_cmdline(pname or proc_name, pcmd)
+        if p3:
+            return p3
+
+        # parent
+        try:
+            parent = psutil.Process(cur_pid).parent()
+            if not parent:
+                break
+            cur_pid = int(parent.pid)
+        except Exception:
+            break
+
+    return ""
+
 
 # ---------------------------
 # 窗口枚举
@@ -460,9 +592,14 @@ def enum_visible_app_windows():
 
             pn = (proc_name or "").lower().replace(".exe", "")
             if pn in BROWSER_SET:
-                profile = get_profile_by_pid_tree(pid, browser_main_map)
+                # 先用严格父链识别（优先真实 profile）
+                profile = get_profile_by_pid_tree_strict(pid)
+                if not profile:
+                    # 再走你原来的主进程映射逻辑
+                    profile = get_profile_by_pid_tree(pid, browser_main_map)
                 if not profile:
                     profile = guess_profile(proc_name, cmdline, title)
+
             else:
                 profile = guess_profile(proc_name, cmdline, title)
 
