@@ -311,6 +311,24 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
                 return os.path.basename(p.rstrip("\\/"))
     return ""
 
+def parse_profile_from_profile_path_text(s: str):
+    """
+    从类似:
+    C:\\Users\\xxx\\AppData\\Local\\Google\\Chrome\\User Data\\Profile 19
+    提取 'Profile 19' / 'Default'
+    """
+    t = (s or "").strip().replace("/", "\\").rstrip("\\")
+    if not t:
+        return ""
+    base = os.path.basename(t)
+    if re.match(r"(?i)^profile\s*\d+$", base):
+        n = re.findall(r"\d+", base)[0]
+        return f"Profile {n}"
+    if base.lower() in ("default", "guest", "personal", "work"):
+        return base.capitalize()
+    return ""
+
+
 def parse_profile_from_cwd(pid):
     """
     优先从进程当前工作目录推断 profile（Chrome/Edge/Brave/Chromium/Firefox）
@@ -520,6 +538,7 @@ def enum_visible_app_windows():
                     "cmdline": cmdline,
                     "profile": profile,
                     "profile_norm": _normalize_profile_text(profile),
+                    "profile_raw": profile,
                 }
             )
             
@@ -719,14 +738,32 @@ def find_browser_group_windows(program):
         or (program.get("window_keyword", "") or "").strip()
     )
 
+    # 如果没配置 profile，就返回所有候选（或按你现有逻辑处理）
+    if not target_profile:
+        return [w for w in cands if is_hwnd_valid(int(w.get("hwnd", 0) or 0))]
+
     matched = []
     for w in cands:
         hwnd = int(w.get("hwnd", 0) or 0)
         if not hwnd or not is_hwnd_valid(hwnd):
             continue
+
         w_prof = (w.get("profile", "") or "").strip()
-        if _profile_match(target_profile, w_prof):
+        w_cmd_prof = parse_profile_from_cmdline(
+            w.get("proc_name", ""), w.get("cmdline", [])
+        )
+        w_title_prof = parse_profile_from_title(
+            w.get("proc_name", ""), w.get("title", "")
+        )
+
+        prof_candidates = [w_prof, w_cmd_prof, w_title_prof]
+        hit = any(_profile_match(target_profile, x) for x in prof_candidates if x)
+        if hit:
             matched.append(w)
+
+    return matched
+
+
 
     if not matched:
         for w in cands:
