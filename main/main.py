@@ -894,7 +894,6 @@ def toggle_program(program):
         group_hwnds = find_browser_group_windows(program)
         if group_hwnds:
             fg = user32.GetForegroundWindow()
-
             if fg in group_hwnds:
                 minimize_windows(group_hwnds)
                 return group_hwnds[0], True
@@ -906,6 +905,7 @@ def toggle_program(program):
                 pass
             return group_hwnds[0], True
 
+        # 浏览器组联动找不到窗口 -> 看是否允许EXE兜底
         if browser_fallback_enabled(program):
             ok = launch_program_by_path(path, args)
             return None, ok
@@ -925,6 +925,7 @@ def toggle_program(program):
                 pass
         return hwnd, True
 
+    # 非浏览器默认可启动；浏览器按开关决定
     if is_browser_program(program):
         if browser_fallback_enabled(program):
             ok = launch_program_by_path(path, args)
@@ -933,6 +934,7 @@ def toggle_program(program):
 
     ok = launch_program_by_path(path, args)
     return None, ok
+
 
 
 def ask_profile_input(parent, default_profile=""):
