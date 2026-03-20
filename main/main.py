@@ -361,20 +361,22 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
     if name in ("chrome", "msedge", "chromium", "brave"):
         v = value_after("--profile-directory")
         if v:
-            return v
+            return _normalize_profile_text(v)
         u = value_after("--user-data-dir")
         if u:
-            return os.path.basename(u.rstrip("\\/"))
+            return _normalize_profile_text(os.path.basename(u.rstrip("\\/")))
         return ""
+
 
     if name == "firefox":
         for i, a in enumerate(args):
             la = a.lower()
             if la in ("-p", "--profile") and i + 1 < len(args):
-                return (args[i + 1] or "").strip().strip('"')
+                return _normalize_profile_text((args[i + 1] or "").strip().strip('"'))
             if la == "-profile" and i + 1 < len(args):
                 p = (args[i + 1] or "").strip().strip('"')
-                return os.path.basename(p.rstrip("\\/"))
+                return _normalize_profile_text(os.path.basename(p.rstrip("\\/")))
+
     return ""
 
 def parse_profile_from_userdata_dir(cmdline_list):
@@ -797,9 +799,15 @@ def _normalize_profile_text(s: str) -> str:
     if not s:
         return ""
     s = re.sub(r"\s+", " ", s)
-    # 统一 profile + 数字 的写法：profile16 -> profile 16
-    s = re.sub(r"\bprofile\s*(\d+)\b", r"profile \1", s, flags=re.IGNORECASE)
+
+    # Profile16 / Profile-16 / Profile_16 / Profile:16 -> profile 16
+    s = re.sub(r"\bprofile[\s\-_:#]*(\d+)\b", r"profile \1", s, flags=re.IGNORECASE)
+
+    # 可选：把 "person 1" 也统一到 "profile 1"（如果你标题里有这种）
+    s = re.sub(r"\bperson[\s\-_:#]*(\d+)\b", r"profile \1", s, flags=re.IGNORECASE)
+
     return s
+
 
 
 def _profile_match(target_profile: str, w_profile: str):
@@ -807,9 +815,19 @@ def _profile_match(target_profile: str, w_profile: str):
     wp = _normalize_profile_text(w_profile)
     if not tp or not wp:
         return False
-    return wp == tp or (tp in wp) or (wp in tp)
 
+    # 完全相等优先
+    if wp == tp:
+        return True
 
+    # profile N 要求数字一致，不做宽松包含
+    m1 = re.match(r"^profile\s+(\d+)$", tp, re.IGNORECASE)
+    m2 = re.match(r"^profile\s+(\d+)$", wp, re.IGNORECASE)
+    if m1 and m2:
+        return m1.group(1) == m2.group(1)
+
+    # 非数字 profile（default/work/personal）才做包含
+    return (tp in wp) or (wp in tp)
 
 def find_browser_group_windows(program):
     path = program.get("path", "")
@@ -825,12 +843,20 @@ def find_browser_group_windows(program):
         or (program.get("window_keyword", "") or "").strip()
     )
 
+    print("[DBG] target_profile=", target_profile, 
+          " normalized=", _normalize_profile_text(target_profile))
+
     matched = []
     for w in cands:
         hwnd = int(w.get("hwnd", 0) or 0)
         if not hwnd or not is_hwnd_valid(hwnd):
             continue
+
         w_prof = (w.get("profile", "") or "").strip()
+        print("[DBG] window_profile=", w_prof,
+              " normalized=", _normalize_profile_text(w_prof))
+        print("[DBG] match=", _profile_match(target_profile, w_prof))
+
         if _profile_match(target_profile, w_prof):
             matched.append(w)
 
@@ -864,6 +890,7 @@ def find_browser_group_windows(program):
             seen.add(h)
             result.append(h)
     return result
+
 
 
 def minimize_windows(hwnds):
