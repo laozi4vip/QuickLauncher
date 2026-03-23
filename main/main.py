@@ -72,10 +72,11 @@ _browser_main_map_ts = 0.0
 # ---------------------------
 # 配置 / 自启
 # ---------------------------
-def get_launch_command():
+def get_launch_command(start_in_tray=False):
+    tray_arg = " --tray" if start_in_tray else ""
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
-    return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+        return f'"{sys.executable}"{tray_arg}'
+    return f'"{sys.executable}" "{os.path.abspath(__file__)}"{tray_arg}'
 
 
 def is_autostart_enabled():
@@ -91,7 +92,7 @@ def set_autostart(enable: bool):
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY_PATH, 0, winreg.KEY_SET_VALUE) as key:
             if enable:
-                winreg.SetValueEx(key, APP_RUN_NAME, 0, winreg.REG_SZ, get_launch_command())
+                winreg.SetValueEx(key, APP_RUN_NAME, 0, winreg.REG_SZ, get_launch_command(start_in_tray=True))
             else:
                 try:
                     winreg.DeleteValue(key, APP_RUN_NAME)
@@ -1822,7 +1823,13 @@ class QuickLauncherFrame(wx.Frame):
 class QuickLauncherApp(wx.App):
     def OnInit(self):
         self.frame = QuickLauncherFrame()
-        self.frame.Show()
+    
+        start_in_tray = any(arg.lower() in ("--tray", "/tray") for arg in sys.argv[1:])
+        if start_in_tray:
+            self.frame.hide_to_tray()   # 不显示主窗口，直接托盘
+        else:
+            self.frame.Show()
+    
         return True
 
 
