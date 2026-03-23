@@ -769,14 +769,9 @@ def find_browser_group_windows(program):
             if any(_profile_match(tp, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x):
                 matched.append(w)
 
-        # profile没命中时，允许分数兜底（避免完全不可用）
+        # 严格模式：配置了 profile 但没命中时，不再分数兜底，直接返回空
         if not matched:
-            for w in cands:
-                hwnd = int(w.get("hwnd", 0) or 0)
-                if not hwnd or not is_hwnd_valid(hwnd):
-                    continue
-                if score_window_for_program(program, w) > 0:
-                    matched.append(w)
+            return []
 
     if not matched:
         return []
