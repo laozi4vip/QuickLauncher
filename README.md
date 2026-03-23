@@ -27,7 +27,10 @@ Windows 任务栏程序快捷启动器
 2. 点击"手动添加"或"从运行程序添加"添加程序
 3. 选择程序后，点击"设置快捷键"绑定快捷键
 4. 按下设置的快捷键即可快速启动或切换程序
-5. 想完美实现浏览器多用户窗口需要绑定Profile；快捷方式添加目标: "C:\Program Files\Google\Chrome\Application\chrome.exe" --profile-directory="Profile XX" --user-data-dir="C:\Users\你的用户名\AppData\Local\Google\Chrome\XXXX"   #按实际路径修改
+5. 想完美实现浏览器多用户窗口需要绑定Profile；
+  方式1：为每个用户窗口添加别名<img width="407" height="308" alt="图片" src="https://github.com/user-attachments/assets/b01ccf3a-7d8b-4451-a845-4e53bb349f6d" />
+  方式2：快捷方式添加目标: "C:\Program Files\Google\Chrome\Application\chrome.exe" --profile-directory="Profile XX" --user-data-dir="C:\Users\你的用户名\AppData\Local\Google\Chrome\XXXX"   #按实际路径修改
+
 ## 构建
 
 ```bash
