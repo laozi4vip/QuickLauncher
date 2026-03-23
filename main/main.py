@@ -742,38 +742,38 @@ def find_browser_group_windows(program):
 
     matched = []
 
-# 没配置 profile：严格按当前配置匹配，不做通用分兜底
-if not target_profile:
-    match_mode = (program.get("match_mode", "title") or "title").strip().lower()
-    keyword = (program.get("window_keyword", "") or "").strip().lower()
-    title_sig = (program.get("title_sig", "") or "").strip().lower()
-
-    for w in cands:
-        hwnd = int(w.get("hwnd", 0) or 0)
-        if not hwnd or not is_hwnd_valid(hwnd):
-            continue
-
-        w_title = (w.get("title", "") or "").lower()
-        w_sig = (w.get("title_sig", "") or "").lower()
-
-        ok = False
-        if match_mode == "title":
-            ok = bool(keyword) and (keyword in w_title)
-            # 可选：如果你想 title_sig 也算命中，可以打开下面一行
-            # ok = ok or (bool(title_sig) and (title_sig in w_sig or w_sig in title_sig))
-        elif match_mode == "hwnd":
-            bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
-            ok = (bind_hwnd > 0 and hwnd == bind_hwnd)
-        else:
-            # profile 模式但 target_profile 为空时，视为不匹配
+    # 没配置 profile：严格按当前配置匹配，不做通用分兜底
+    if not target_profile:
+        match_mode = (program.get("match_mode", "title") or "title").strip().lower()
+        keyword = (program.get("window_keyword", "") or "").strip().lower()
+        title_sig = (program.get("title_sig", "") or "").strip().lower()
+    
+        for w in cands:
+            hwnd = int(w.get("hwnd", 0) or 0)
+            if not hwnd or not is_hwnd_valid(hwnd):
+                continue
+    
+            w_title = (w.get("title", "") or "").lower()
+            w_sig = (w.get("title_sig", "") or "").lower()
+    
             ok = False
-
-        if ok:
-            matched.append(w)
-
-    # 严格模式：没有命中直接返回空，不再兜底
-    if not matched:
-        return []
+            if match_mode == "title":
+                ok = bool(keyword) and (keyword in w_title)
+                # 可选：如果你想 title_sig 也算命中，可以打开下面一行
+                # ok = ok or (bool(title_sig) and (title_sig in w_sig or w_sig in title_sig))
+            elif match_mode == "hwnd":
+                bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
+                ok = (bind_hwnd > 0 and hwnd == bind_hwnd)
+            else:
+                # profile 模式但 target_profile 为空时，视为不匹配
+                ok = False
+    
+            if ok:
+                matched.append(w)
+    
+        # 严格模式：没有命中直接返回空，不再兜底
+        if not matched:
+            return []
 
     else:
         # 配置了 profile：多来源匹配（窗口缓存profile + cmdline + title）
