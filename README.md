@@ -28,7 +28,7 @@ Windows 任务栏程序快捷启动器
 3. 选择程序后，点击"设置快捷键"绑定快捷键
 4. 按下设置的快捷键即可快速启动或切换程序
 5. 想完美实现浏览器多用户窗口需要绑定Profile；
-  方式1：为每个用户窗口添加别名<img width="407" height="308" alt="图片" src="https://github.com/user-attachments/assets/b01ccf3a-7d8b-4451-a845-4e53bb349f6d" />
+  方式1：以谷歌浏览器为例，为每个用户窗口添加别名，然后用title模式绑定。<img width="324" height="312" alt="图片" src="https://github.com/user-attachments/assets/b87525d8-f07a-44fe-b34f-ba2cca9025d6" />
   方式2：快捷方式添加目标: "C:\Program Files\Google\Chrome\Application\chrome.exe" --profile-directory="Profile XX" --user-data-dir="C:\Users\你的用户名\AppData\Local\Google\Chrome\XXXX"   #按实际路径修改
 
 ## 构建
