@@ -123,9 +123,7 @@ def load_config():
                 p.setdefault("profile_name", "")
                 p.setdefault("title_sig", "")
                 p.setdefault("browser_fallback_exe", False)
-                # 浏览器同profile组联动开关
                 p.setdefault("browser_group_toggle", True)
-                # 新增：热键动作 toggle/hide
                 p.setdefault("hotkey_action", "toggle")
             return {"programs": programs, "autostart": autostart}
         except Exception as e:
@@ -211,7 +209,7 @@ def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
         main_key = chr(key).lower()
     elif ord("a") <= key <= ord("z"):
         main_key = chr(key).lower()
-    elif key in (ord("`"), ord("~"), 0xC0):   # 新增
+    elif key in (ord("`"), ord("~"), 0xC0):
         main_key = "`"
     else:
         return ""
@@ -313,11 +311,6 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
     return ""
 
 def parse_profile_from_profile_path_text(s: str):
-    """
-    从类似:
-    C:\\Users\\xxx\\AppData\\Local\\Google\\Chrome\\User Data\\Profile 19
-    提取 'Profile 19' / 'Default'
-    """
     t = (s or "").strip().replace("/", "\\").rstrip("\\")
     if not t:
         return ""
@@ -331,12 +324,6 @@ def parse_profile_from_profile_path_text(s: str):
 
 
 def parse_profile_from_cwd(pid):
-    """
-    优先从进程当前工作目录推断 profile（Chrome/Edge/Brave/Chromium/Firefox）
-    例如:
-      C:\\Users\\xxx\\AppData\\Local\\Google\\Chrome\\User Data\\Profile xx
-      C:\\Users\\xxx\\AppData\\Local\\Google\\Chrome\\User Data\\Default
-    """
     try:
         p = psutil.Process(pid)
         cwd = p.cwd() or ""
@@ -349,13 +336,11 @@ def parse_profile_from_cwd(pid):
     c = cwd.replace("/", "\\").rstrip("\\")
     base = os.path.basename(c)
     if re.match(r"(?i)^profile\s*\d+$", base):
-        # 统一成 Profile N 格式
         n = re.findall(r"\d+", base)[0]
         return f"Profile {n}"
     if base.lower() in ("default", "guest", "personal", "work"):
         return base.capitalize()
 
-    # 有些情况下 cwd 在 User Data 根目录，取不到具体 profile
     return ""
 
 
@@ -364,12 +349,10 @@ def parse_profile_from_title(proc_name: str, title: str):
     if not t:
         return ""
 
-    # 优先匹配括号里的 Profile，比如: xxx - Google Chrome (Profile 2)
     m = re.search(r"\((profile\s*\d+|default|personal|work|guest)\)", t, re.IGNORECASE)
     if m:
         return m.group(1).strip()
 
-    # 再匹配独立词
     m2 = re.search(r"\b(profile\s*\d+|default|personal|work|guest)\b", t, re.IGNORECASE)
     if m2:
         return m2.group(1).strip()
@@ -378,18 +361,15 @@ def parse_profile_from_title(proc_name: str, title: str):
 
 
 def guess_profile(proc_name: str, cmdline_list, title: str, pid: int = 0):
-    # 1) cwd 优先
     if pid:
         p0 = parse_profile_from_cwd(pid)
         if p0:
             return p0
 
-    # 2) cmdline
     p1 = parse_profile_from_cmdline(proc_name, cmdline_list)
     if p1:
         return p1
 
-    # 3) title 兜底
     return parse_profile_from_title(proc_name, title)
 
 
@@ -601,6 +581,76 @@ def build_profile_args(proc_name: str, profile: str):
     return ""
 
 
+def _normalize_profile_text(s: str):
+    t = (s or "").strip().lower()
+    if not t:
+        return ""
+    t = t.replace("　", " ")
+    t = re.sub(r"\s+", " ", t)
+    t = t.replace("-", " ")
+    t = re.sub(r"^profile\s*(\d+)$", r"profile \1", t)
+    if t == "default profile":
+        t = "default"
+    return t
+
+def _profile_match(target_profile: str, w_profile: str):
+    tp = _normalize_profile_text(target_profile)
+    wp = _normalize_profile_text(w_profile)
+    if not tp or not wp:
+        return False
+    return wp == tp or (tp in wp) or (wp in tp)
+
+
+# 新增：严格匹配要求（设置了哪些条件，就必须全部命中）
+def browser_window_matches_all_configured(program, w):
+    match_mode = (program.get("match_mode", "title") or "title").strip().lower()
+    keyword = (program.get("window_keyword", "") or "").strip()
+    profile_name = (program.get("profile_name", "") or "").strip()
+    title_sig = (program.get("title_sig", "") or "").strip()
+    bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
+
+    w_hwnd = int(w.get("hwnd", 0) or 0)
+    w_title = (w.get("title", "") or "").lower()
+    w_sig = (w.get("title_sig", "") or "").lower()
+
+    w_pf = _normalize_profile_text(w.get("profile", ""))
+    w_cmd_pf = _normalize_profile_text(parse_profile_from_cmdline(w.get("proc_name", ""), w.get("cmdline", [])))
+    w_t_pf = _normalize_profile_text(parse_profile_from_title(w.get("proc_name", ""), w.get("title", "")))
+
+    checks = []
+
+    # mode 对应条件
+    if match_mode == "hwnd":
+        checks.append(bind_hwnd > 0 and w_hwnd == bind_hwnd)
+    elif match_mode == "title":
+        checks.append(bool(keyword) and (keyword.lower() in w_title))
+    elif match_mode == "profile":
+        tp = _normalize_profile_text(profile_name or keyword)
+        checks.append(bool(tp) and any(_profile_match(tp, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x))
+
+    # 额外配置：只要填了，也必须匹配
+    if keyword:
+        if match_mode == "profile":
+            tp_kw = _normalize_profile_text(keyword)
+            checks.append(any(_profile_match(tp_kw, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x))
+        elif match_mode == "hwnd":
+            checks.append(True)  # hwnd 模式下 keyword 仅视作备注，不强制
+        else:
+            checks.append(keyword.lower() in w_title)
+
+    if profile_name:
+        tp_pf = _normalize_profile_text(profile_name)
+        checks.append(any(_profile_match(tp_pf, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x))
+
+    if title_sig:
+        ts = title_sig.lower()
+        checks.append(bool(w_sig) and (w_sig == ts or ts in w_sig or w_sig in ts))
+
+    if not checks:
+        return False
+    return all(checks)
+
+
 def score_window_for_program(program, w):
     score = 0
     keyword = (program.get("window_keyword", "") or "").strip().lower()
@@ -611,17 +661,14 @@ def score_window_for_program(program, w):
     w_title = (w.get("title", "") or "").lower()
     w_sig = (w.get("title_sig", "") or "").lower()
     w_prof = _normalize_profile_text(w.get("profile", ""))
-# 关键补强：直接从当前窗口进程命令行再提取一次 profile
     w_cmd_prof = _normalize_profile_text(
         parse_profile_from_cmdline(w.get("proc_name", ""), w.get("cmdline", []))
     )
     if not w_cmd_prof:
-        # 再尝试从标题取
         w_cmd_prof = _normalize_profile_text(
             parse_profile_from_title(w.get("proc_name", ""), w.get("title", ""))
         )
     
-    # 如果程序配置了 profile_name，命令行命中给高分
     if profile_name and w_cmd_prof:
         if w_cmd_prof == profile_name:
             score += 140
@@ -661,19 +708,13 @@ def score_window_for_program(program, w):
     return score
 
 
-# ---------------------------
-# 核心查找（含 HWND 自动重绑）
-# ---------------------------
 def find_window_for_program(program):
     path = program.get("path", "")
     if not path:
         return None
 
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
-    keyword = _normalize_profile_text(program.get("window_keyword", ""))
     bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
-    title_sig = (program.get("title_sig", "") or "").strip().lower()
-    profile_name = _normalize_profile_text(program.get("profile_name", ""))
 
     if match_mode == "hwnd" and bind_hwnd and is_hwnd_valid(bind_hwnd):
         pid = get_pid_from_hwnd(bind_hwnd)
@@ -693,37 +734,16 @@ def find_window_for_program(program):
     best_score, best_hwnd, _ = scored[0]
     
     if is_browser_program(program):
-        if best_score > 0:
-            return best_hwnd
-        return None
+        # 浏览器改为严格：不使用“有分就算匹配”
+        strict = [x for x in candidates if browser_window_matches_all_configured(program, x)]
+        if not strict:
+            return None
+        strict.sort(key=lambda w: score_window_for_program(program, w), reverse=True)
+        return int(strict[0].get("hwnd", 0) or 0) or None
 
-    if (keyword or profile_name or title_sig) and best_score <= 0:
+    if best_score <= 0:
         return None
     return best_hwnd
-
-
-# ---------------------------
-# 浏览器同 Profile 组窗口查找 & 批量切换
-# ---------------------------
-def _normalize_profile_text(s: str):
-    t = (s or "").strip().lower()
-    if not t:
-        return ""
-    t = t.replace("　", " ")
-    t = re.sub(r"\s+", " ", t)
-    t = t.replace("-", " ")
-    t = re.sub(r"^profile\s*(\d+)$", r"profile \1", t)   # profile1 -> profile 1
-    if t == "default profile":
-        t = "default"
-    return t
-
-def _profile_match(target_profile: str, w_profile: str):
-    tp = _normalize_profile_text(target_profile)
-    wp = _normalize_profile_text(w_profile)
-    if not tp or not wp:
-        return False
-    return wp == tp or (tp in wp) or (wp in tp)
-
 
 
 def find_browser_group_windows(program):
@@ -735,68 +755,14 @@ def find_browser_group_windows(program):
     if not cands:
         return []
 
-    target_profile = (
-        (program.get("profile_name", "") or "").strip()
-        or (program.get("window_keyword", "") or "").strip()
-    )
-
+    # 浏览器组联动改为严格：配置了哪些条件就全部命中
     matched = []
-
-    # 没配置 profile：严格按当前配置匹配，不做通用分兜底
-    if not target_profile:
-        match_mode = (program.get("match_mode", "title") or "title").strip().lower()
-        keyword = (program.get("window_keyword", "") or "").strip().lower()
-        title_sig = (program.get("title_sig", "") or "").strip().lower()
-    
-        for w in cands:
-            hwnd = int(w.get("hwnd", 0) or 0)
-            if not hwnd or not is_hwnd_valid(hwnd):
-                continue
-    
-            w_title = (w.get("title", "") or "").lower()
-            w_sig = (w.get("title_sig", "") or "").lower()
-    
-            ok = False
-            if match_mode == "title":
-                ok = bool(keyword) and (keyword in w_title)
-                # 可选：如果你想 title_sig 也算命中，可以打开下面一行
-                # ok = ok or (bool(title_sig) and (title_sig in w_sig or w_sig in title_sig))
-            elif match_mode == "hwnd":
-                bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
-                ok = (bind_hwnd > 0 and hwnd == bind_hwnd)
-            else:
-                # profile 模式但 target_profile 为空时，视为不匹配
-                ok = False
-    
-            if ok:
-                matched.append(w)
-    
-        # 严格模式：没有命中直接返回空，不再兜底
-        if not matched:
-            return []
-
-    else:
-        # 配置了 profile：多来源匹配（窗口缓存profile + cmdline + title）
-        tp = _normalize_profile_text(target_profile)
-        for w in cands:
-            hwnd = int(w.get("hwnd", 0) or 0)
-            if not hwnd or not is_hwnd_valid(hwnd):
-                continue
-
-            w_pf = _normalize_profile_text(w.get("profile", ""))
-            w_cmd_pf = _normalize_profile_text(
-                parse_profile_from_cmdline(w.get("proc_name", ""), w.get("cmdline", []))
-            )
-            w_t_pf = _normalize_profile_text(
-                parse_profile_from_title(w.get("proc_name", ""), w.get("title", ""))
-            )
-
-            if any(_profile_match(tp, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x):
-                matched.append(w)
-
-        # 严格模式：配置了 profile 但没命中时，不再分数兜底，直接返回空
-        if not matched:
-            return []
+    for w in cands:
+        hwnd = int(w.get("hwnd", 0) or 0)
+        if not hwnd or not is_hwnd_valid(hwnd):
+            continue
+        if browser_window_matches_all_configured(program, w):
+            matched.append(w)
 
     if not matched:
         return []
@@ -1015,9 +981,6 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
         return menu
 
 
-# ---------------------------
-# 主窗口
-# ---------------------------
 class QuickLauncherFrame(wx.Frame):
     def __init__(self):
         super().__init__(None, title=f"{__app_name__} v{__version__}", size=(1220, 650))
@@ -1038,7 +1001,6 @@ class QuickLauncherFrame(wx.Frame):
         self.hotkey_id_to_index = {}
         self.registered_hotkey_ids = []
         self.exiting = False
-        # 新增：隐藏状态缓存，key=程序索引
         self.hidden_states = {}
 
         self.init_ui()
@@ -1231,7 +1193,6 @@ class QuickLauncherFrame(wx.Frame):
         self.persist()
         wx.MessageBox("设置已保存", "成功")
 
-    # ---- 隐藏/恢复窗口（含任务栏图标）----
     def _hide_window_and_taskbar(self, hwnd: int):
         if not is_hwnd_valid(hwnd):
             return None
@@ -1264,7 +1225,6 @@ class QuickLauncherFrame(wx.Frame):
         key = int(idx)
         state = self.hidden_states.get(key)
 
-        # 已隐藏 -> 恢复
         if state:
             items = state.get("items", [])
             restored_any = False
@@ -1279,7 +1239,6 @@ class QuickLauncherFrame(wx.Frame):
             self.hidden_states.pop(key, None)
             return None, restored_any
 
-        # 未隐藏 -> 先找窗口
         hwnds = []
         if is_browser_program(p) and browser_group_toggle_enabled(p):
             hwnds = find_browser_group_windows(p)
@@ -1303,7 +1262,6 @@ class QuickLauncherFrame(wx.Frame):
         self.hidden_states[key] = {"items": hidden_items}
         return hidden_items[0]["hwnd"], True
 
-    # ---- 自动补绑逻辑 ----
     def get_used_hwnds_by_same_path(self, path, exclude_index=None):
         used = set()
         tpath = os.path.normcase(path or "")
@@ -1350,7 +1308,6 @@ class QuickLauncherFrame(wx.Frame):
             if not hwnd or hwnd in used or not is_hwnd_valid(hwnd):
                 continue
     
-            # ===== 新增：profile_name 硬过滤（防跨profile误绑）=====
             if target_pf:
                 w_pf = _normalize_profile_text(w.get("profile", ""))
                 w_cmd_pf = _normalize_profile_text(
@@ -1361,7 +1318,6 @@ class QuickLauncherFrame(wx.Frame):
                 )
                 if not any(_profile_match(target_pf, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x):
                     continue
-            # ====================================================
     
             s = score_window_for_program(p, w)
             scored.append((s, hwnd, w))
@@ -1409,7 +1365,6 @@ class QuickLauncherFrame(wx.Frame):
             self.refresh_list()
         return changed
 
-    # ---- 热键 ----
     def unregister_all_hotkeys(self):
         for i in self.registered_hotkey_ids:
             try:
@@ -1456,7 +1411,6 @@ class QuickLauncherFrame(wx.Frame):
             return
         p = self.programs[idx]
 
-        # 新增动作：隐藏/恢复（窗口+任务栏图标）
         if is_hide_action(p):
             hwnd, acted = self.toggle_hide_for_program(idx, p)
             if acted:
@@ -1500,7 +1454,6 @@ class QuickLauncherFrame(wx.Frame):
             self.refresh_list()
         self.update_status(f"已切换：{p.get('name', '')}")
 
-    # ---- 添加/编辑 ----
     def on_manual_add(self, _):
         dlg = wx.Dialog(self, title="手动添加", size=(800, 560))
         panel = wx.Panel(dlg)
@@ -1846,7 +1799,7 @@ class QuickLauncherApp(wx.App):
     
         start_in_tray = any(arg.lower() in ("--tray", "/tray") for arg in sys.argv[1:])
         if start_in_tray:
-            self.frame.hide_to_tray()   # 不显示主窗口，直接托盘
+            self.frame.hide_to_tray()
         else:
             self.frame.Show()
     
