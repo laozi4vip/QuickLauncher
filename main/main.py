@@ -8,7 +8,7 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 __author__ = "laozi4vip"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
 __app_name__ = "QuickLauncher"
-__version__ = "3.6"
+__version__ = "3.5"
 __description__ = "Windows 任务栏快捷启动器"
 
 import wx
@@ -601,7 +601,6 @@ def _profile_match(target_profile: str, w_profile: str):
     return wp == tp or (tp in wp) or (wp in tp)
 
 
-# 新增：严格匹配要求（设置了哪些条件，就必须全部命中）
 def browser_window_matches_all_configured(program, w):
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
     keyword = (program.get("window_keyword", "") or "").strip()
@@ -619,22 +618,21 @@ def browser_window_matches_all_configured(program, w):
 
     checks = []
 
-    # mode 对应条件
-    if match_mode == "hwnd":
-        checks.append(bind_hwnd > 0 and w_hwnd == bind_hwnd)
-    elif match_mode == "title":
-        checks.append(bool(keyword) and (keyword.lower() in w_title))
+    if match_mode == "hwnd" and bind_hwnd > 0:
+        checks.append(w_hwnd == bind_hwnd)
+    elif match_mode == "title" and keyword:
+        checks.append(keyword.lower() in w_title)
     elif match_mode == "profile":
         tp = _normalize_profile_text(profile_name or keyword)
-        checks.append(bool(tp) and any(_profile_match(tp, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x))
+        if tp:
+            checks.append(any(_profile_match(tp, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x))
 
-    # 额外配置：只要填了，也必须匹配
     if keyword:
         if match_mode == "profile":
             tp_kw = _normalize_profile_text(keyword)
             checks.append(any(_profile_match(tp_kw, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x))
         elif match_mode == "hwnd":
-            checks.append(True)  # hwnd 模式下 keyword 仅视作备注，不强制
+            checks.append(True)
         else:
             checks.append(keyword.lower() in w_title)
 
@@ -713,6 +711,11 @@ def find_window_for_program(program):
     if not path:
         return None
 
+    if is_browser_program(program) and (browser_group_toggle_enabled(program) or browser_fallback_enabled(program)):
+        cands = enum_windows_for_program(path)
+        valid = [int(w.get("hwnd", 0) or 0) for w in cands if is_hwnd_valid(int(w.get("hwnd", 0) or 0))]
+        return valid[0] if valid else None
+
     match_mode = (program.get("match_mode", "title") or "title").strip().lower()
     bind_hwnd = int(program.get("bind_hwnd", 0) or 0)
 
@@ -726,20 +729,19 @@ def find_window_for_program(program):
     if not candidates:
         return None
 
+    if is_browser_program(program):
+        strict = [x for x in candidates if browser_window_matches_all_configured(program, x)]
+        if not strict:
+            return None
+        strict.sort(key=lambda w: score_window_for_program(program, w), reverse=True)
+        return int(strict[0].get("hwnd", 0) or 0) or None
+
     scored = []
     for w in candidates:
         s = score_window_for_program(program, w)
         scored.append((s, int(w["hwnd"]), w))
     scored.sort(key=lambda x: x[0], reverse=True)
     best_score, best_hwnd, _ = scored[0]
-    
-    if is_browser_program(program):
-        # 浏览器改为严格：不使用“有分就算匹配”
-        strict = [x for x in candidates if browser_window_matches_all_configured(program, x)]
-        if not strict:
-            return None
-        strict.sort(key=lambda w: score_window_for_program(program, w), reverse=True)
-        return int(strict[0].get("hwnd", 0) or 0) or None
 
     if best_score <= 0:
         return None
@@ -755,14 +757,20 @@ def find_browser_group_windows(program):
     if not cands:
         return []
 
-    # 浏览器组联动改为严格：配置了哪些条件就全部命中
-    matched = []
-    for w in cands:
-        hwnd = int(w.get("hwnd", 0) or 0)
-        if not hwnd or not is_hwnd_valid(hwnd):
-            continue
-        if browser_window_matches_all_configured(program, w):
-            matched.append(w)
+    if browser_group_toggle_enabled(program) or browser_fallback_enabled(program):
+        matched = []
+        for w in cands:
+            hwnd = int(w.get("hwnd", 0) or 0)
+            if hwnd and is_hwnd_valid(hwnd):
+                matched.append(w)
+    else:
+        matched = []
+        for w in cands:
+            hwnd = int(w.get("hwnd", 0) or 0)
+            if not hwnd or not is_hwnd_valid(hwnd):
+                continue
+            if browser_window_matches_all_configured(program, w):
+                matched.append(w)
 
     if not matched:
         return []
@@ -885,9 +893,6 @@ def ask_profile_input(parent, default_profile=""):
     return ret == wx.ID_OK, val
 
 
-# ---------------------------
-# 交互对话
-# ---------------------------
 class HotkeyCaptureDialog(wx.Dialog):
     def __init__(self, parent, current_hotkey=""):
         super().__init__(parent, title="设置快捷键", size=(460, 220))
@@ -1429,7 +1434,7 @@ class QuickLauncherFrame(wx.Frame):
 
         hwnd, acted = toggle_program(p)
 
-        if is_browser_program(p) and not acted:
+        if not acted:
             return
 
         changed = False
