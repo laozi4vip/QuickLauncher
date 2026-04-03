@@ -40,7 +40,7 @@ pyinstaller --onefile --windowed --collect-all wx --collect-all psutil --name Qu
 ## 版本历史
 
 - v3.0 新增窗口及任务栏图标隐藏功能
-- v2.0 新增控制同浏览器多用户窗口功能，需要单独设置浏览器，以谷歌浏览器为例，多用户窗口需要绑定Profile；快捷方式添加目标: "C:\Program Files\Google\Chrome\Application\chrome.exe" --profile-directory="Profile XX" --user-data-dir="C:\Users\你的用户名\AppData\Local\Google\Chrome\XXXX"   #按实际路径修改
+- v2.0 新增控制同浏览器多用户窗口功能
 - v1.0 略
 
 ## 许可证
