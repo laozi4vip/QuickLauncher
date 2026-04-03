@@ -1293,9 +1293,11 @@ class QuickLauncherFrame(wx.Frame):
         if state:
             items = state.get("items", [])
             restored_any = False
-            for it in items:
+            for i, it in enumerate(items):
                 if self._restore_window_and_taskbar(it):
                     restored_any = True
+                if i % 3 == 2:
+                    time.sleep(0.02)
             if restored_any and items:
                 try:
                     user32.SetForegroundWindow(int(items[0].get("hwnd", 0) or 0))
