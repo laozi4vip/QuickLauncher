@@ -88,6 +88,24 @@ def is_autostart_enabled():
     except Exception:
         return False
 
+def cleanup_caches(max_proc_cache=2048):
+    now = time.time()
+
+    # 进程缓存清理
+    if len(_proc_info_cache) > max_proc_cache:
+        items = sorted(_proc_info_cache.items(), key=lambda kv: kv[1].get("ts", 0), reverse=True)
+        keep = dict(items[:max_proc_cache // 2])
+        _proc_info_cache.clear()
+        _proc_info_cache.update(keep)
+
+    # LAST_ACTIVE_PROFILE_HWND 过期
+    dead = []
+    for k, (hwnd, ts) in LAST_ACTIVE_PROFILE_HWND.items():
+        if (now - ts > 3600) or (not is_hwnd_valid(hwnd)):
+            dead.append(k)
+    for k in dead:
+        LAST_ACTIVE_PROFILE_HWND.pop(k, None)
+
 
 def set_autostart(enable: bool):
     try:
@@ -267,7 +285,14 @@ def is_hwnd_valid(hwnd: int):
         return False
 
 
-def get_proc_path_name_cmdline(pid):
+_proc_info_cache = {}  # pid -> {"ts":..., "v":(path,name,cmdline), "ok":bool}
+
+def get_proc_path_name_cmdline(pid, max_age=2.0):
+    now = time.time()
+    c = _proc_info_cache.get(pid)
+    if c and (now - c["ts"] < max_age):
+        return c["v"]
+
     try:
         p = psutil.Process(pid)
         path = p.exe() or ""
@@ -276,9 +301,13 @@ def get_proc_path_name_cmdline(pid):
             cmdline_list = p.cmdline()
         except Exception:
             cmdline_list = []
-        return path, name, cmdline_list
+        v = (path, name, cmdline_list)
+        _proc_info_cache[pid] = {"ts": now, "v": v, "ok": True}
+        return v
     except Exception:
-        return "", "", []
+        v = ("", "", [])
+        _proc_info_cache[pid] = {"ts": now, "v": v, "ok": False}
+        return v
 
 
 def parse_profile_from_cmdline(proc_name: str, cmdline_list):
@@ -455,7 +484,7 @@ def build_browser_main_proc_map():
     return main_map
 
 
-def get_cached_browser_main_map(max_age=3.0):
+def get_cached_browser_main_map(max_age=8.0):
     global _browser_main_map_cache, _browser_main_map_ts
     now = time.time()
     if now - _browser_main_map_ts < max_age and _browser_main_map_cache:
@@ -490,50 +519,20 @@ def get_profile_by_pid_tree(pid, main_map):
 # ---------------------------
 # 窗口枚举
 # ---------------------------
-def enum_visible_app_windows():
+_window_enum_cache = {"ts": 0.0, "data": []}
+
+def enum_visible_app_windows(max_age=0.8, force=False):
+    global _window_enum_cache
+    now = time.time()
+    if (not force) and _window_enum_cache["data"] and (now - _window_enum_cache["ts"] < max_age):
+        return _window_enum_cache["data"]
+
     windows = []
-    browser_main_map = get_cached_browser_main_map(max_age=2.0)
-
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-    def callback(hwnd, _):
-        try:
-            if not user32.IsWindow(hwnd):
-                return True
-            if not is_alt_tab_window(hwnd):
-                return True
-
-            pid = get_pid_from_hwnd(hwnd)
-            title = get_window_title(hwnd).strip()
-            path, proc_name, cmdline = get_proc_path_name_cmdline(pid)
-
-            pn = (proc_name or "").lower().replace(".exe", "")
-            if pn in BROWSER_SET:
-                profile = get_profile_by_pid_tree(pid, browser_main_map)
-                if not profile:
-                    profile = guess_profile(proc_name, cmdline, title, pid)
-            else:
-                profile = guess_profile(proc_name, cmdline, title, pid)
-
-            windows.append(
-                {
-                    "hwnd": int(hwnd),
-                    "pid": int(pid),
-                    "title": title,
-                    "title_sig": make_title_signature(title),
-                    "path": path,
-                    "proc_name": proc_name,
-                    "cmdline": cmdline,
-                    "profile": profile,
-                    "profile_norm": _normalize_profile_text(profile),
-                    "profile_raw": profile,
-                }
-            )
-            
-        except Exception:
-            pass
-        return True
-
+    browser_main_map = get_cached_browser_main_map(max_age=5.0)
+    ...
     user32.EnumWindows(callback, 0)
+
+    _window_enum_cache = {"ts": now, "data": windows}
     return windows
 
 
@@ -1061,15 +1060,21 @@ class QuickLauncherFrame(wx.Frame):
         self.fg_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_timer, self.fg_timer)
         self._last_fg_hwnd = 0
-        self.fg_timer.Start(3000)
-
+        self._last_cache_cleanup = 0.0
+        self.fg_timer.Start(5000)
+        
     def on_timer(self, _):
         hwnd = user32.GetForegroundWindow()
-        if hwnd == self._last_fg_hwnd:
-            return
-        self._last_fg_hwnd = hwnd
-        update_last_active_cache()
+        if hwnd != self._last_fg_hwnd:
+            self._last_fg_hwnd = hwnd
+            update_last_active_cache()
+    
+        now = time.time()
+        if now - self._last_cache_cleanup > 300:
+            cleanup_caches()
+            self._last_cache_cleanup = now
 
+    
     def init_ui(self):
         menubar = wx.MenuBar()
 
@@ -1159,22 +1164,44 @@ class QuickLauncherFrame(wx.Frame):
 
     def hide_to_tray(self):
         self.Hide()
+        if self.fg_timer.IsRunning():
+            self.fg_timer.Stop()
+        self.fg_timer.Start(10000)  # 托盘态低频
         self.update_status("已最小化到托盘")
-
+    
     def show_from_tray(self):
         self.Show()
         self.Raise()
         self.Iconize(False)
+        if self.fg_timer.IsRunning():
+            self.fg_timer.Stop()
+        self.fg_timer.Start(3000)   # 交互态恢复
         self.update_status("窗口已恢复")
 
     def on_close(self, event):
         if self.exiting:
+            try:
+                if self.fg_timer and self.fg_timer.IsRunning():
+                    self.fg_timer.Stop()
+            except Exception:
+                pass
+        
             self.restore_all_hidden_windows()
             self.unregister_all_hotkeys()
-            if self.taskbar:
-                self.taskbar.RemoveIcon()
-                self.taskbar.Destroy()
+        
+            if getattr(self, "taskbar", None):
+                try:
+                    self.taskbar.RemoveIcon()
+                except Exception:
+                    pass
+                try:
+                    self.taskbar.Destroy()
+                except Exception:
+                    pass
+                self.taskbar = None
+        
             event.Skip()
+
         else:
             event.Veto()
             self.hide_to_tray()
