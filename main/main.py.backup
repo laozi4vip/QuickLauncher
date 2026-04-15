@@ -8,7 +8,7 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 __author__ = "laozi4vip"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
 __app_name__ = "QuickLauncher"
-__version__ = "最终版"
+__version__ = "3.4"
 __description__ = "Windows 任务栏快捷启动器"
 
 import wx
@@ -390,6 +390,9 @@ def make_title_signature(title: str):
 
 def set_window_exstyle(hwnd: int, exstyle: int):
     try:
+        cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if cur == exstyle:
+            return  # 无变化，不触发 FRAMECHANGED
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, exstyle)
         user32.SetWindowPos(
             hwnd,
@@ -1057,9 +1060,14 @@ class QuickLauncherFrame(wx.Frame):
 
         self.fg_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_timer, self.fg_timer)
-        self.fg_timer.Start(1200)
+        self._last_fg_hwnd = 0
+        self.fg_timer.Start(3000)
 
     def on_timer(self, _):
+        hwnd = user32.GetForegroundWindow()
+        if hwnd == self._last_fg_hwnd:
+            return
+        self._last_fg_hwnd = hwnd
         update_last_active_cache()
 
     def init_ui(self):
@@ -1241,27 +1249,41 @@ class QuickLauncherFrame(wx.Frame):
             return None
         old_ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         new_ex = (old_ex | WS_EX_TOOLWINDOW) & (~WS_EX_APPWINDOW)
-        set_window_exstyle(hwnd, new_ex)
-        user32.ShowWindow(hwnd, SW_HIDE)
+    
+        # 仅在确实变化时改样式
+        if new_ex != old_ex:
+            set_window_exstyle(hwnd, new_ex)
+    
+        # 已不可见就不重复 Hide
+        if user32.IsWindowVisible(hwnd):
+            user32.ShowWindow(hwnd, SW_HIDE)
+    
         return {"hwnd": int(hwnd), "exstyle": int(old_ex)}
-
+    
     def _restore_window_and_taskbar(self, item):
         hwnd = int(item.get("hwnd", 0) or 0)
         if not is_hwnd_valid(hwnd):
             return False
+    
         old_ex = int(item.get("exstyle", 0))
-        set_window_exstyle(hwnd, old_ex)
+        cur_ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if cur_ex != old_ex:
+            set_window_exstyle(hwnd, old_ex)
+    
         user32.ShowWindow(hwnd, SW_SHOW)
         user32.ShowWindow(hwnd, SW_RESTORE)
         return True
+    
 
     def restore_all_hidden_windows(self):
         keys = list(self.hidden_states.keys())
         for k in keys:
             state = self.hidden_states.get(k, {})
             items = state.get("items", [])
-            for it in items:
+            for i, it in enumerate(items):
                 self._restore_window_and_taskbar(it)
+                if i % 3 == 2:
+                    time.sleep(0.02)
         self.hidden_states.clear()
 
     def toggle_hide_for_program(self, idx, p):
@@ -1271,9 +1293,11 @@ class QuickLauncherFrame(wx.Frame):
         if state:
             items = state.get("items", [])
             restored_any = False
-            for it in items:
+            for i, it in enumerate(items):
                 if self._restore_window_and_taskbar(it):
                     restored_any = True
+                if i % 3 == 2:
+                    time.sleep(0.02)
             if restored_any and items:
                 try:
                     user32.SetForegroundWindow(int(items[0].get("hwnd", 0) or 0))
@@ -1294,10 +1318,12 @@ class QuickLauncherFrame(wx.Frame):
             return None, False
 
         hidden_items = []
-        for h in hwnds:
+        for i, h in enumerate(hwnds):
             it = self._hide_window_and_taskbar(h)
             if it:
                 hidden_items.append(it)
+            if i % 3 == 2:
+                time.sleep(0.02)  # 20ms 节流
 
         if not hidden_items:
             return None, False
@@ -1410,6 +1436,11 @@ class QuickLauncherFrame(wx.Frame):
 
     def unregister_all_hotkeys(self):
         for i in self.registered_hotkey_ids:
+            try:
+                # 关键：解除该 id 的 EVT_HOTKEY 绑定，防止潜在累积
+                self.Unbind(wx.EVT_HOTKEY, id=i)
+            except Exception:
+                pass
             try:
                 self.UnregisterHotKey(i)
             except Exception:
