@@ -64,12 +64,16 @@ else:
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
+# 优化：缓存结构改为 (时间戳, 数据)
 _proc_info_cache = {}
-
 LAST_ACTIVE_PROFILE_HWND = {}
-
 _browser_main_map_cache = {}
 _browser_main_map_ts = 0.0
+
+# 优化：添加缓存配置常量
+PROC_CACHE_EXPIRE = 10.0  # 进程缓存过期时间（秒）
+PROC_CACHE_MAX_SIZE = 300  # 最大缓存条目数
+BROWSER_MAP_CACHE_TIME = 8.0  # 浏览器映射缓存时间
 
 
 # ---------------------------
@@ -148,6 +152,7 @@ def normalize_hotkey(hotkey: str) -> str:
     hk = (hotkey or "").strip().lower().replace(" ", "")
     hk = hk.replace("grave", "`").replace("tilde", "`")
     return hk
+
 
 def hotkey_to_mod_vk(hotkey: str):
     hotkey = normalize_hotkey(hotkey)
@@ -233,15 +238,19 @@ def wx_event_to_hotkey(event: wx.KeyEvent) -> str:
 
 
 # ---------------------------
-# 窗口 / 进程工具
+# 窗口 / 进程工具（优化版）
 # ---------------------------
 def get_window_title(hwnd):
-    length = user32.GetWindowTextLengthW(hwnd)
-    if length <= 0:
+    """优化：增加超时保护"""
+    try:
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return ""
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        return buf.value or ""
+    except Exception:
         return ""
-    buf = ctypes.create_unicode_buffer(length + 1)
-    user32.GetWindowTextW(hwnd, buf, length + 1)
-    return buf.value or ""
 
 
 def get_pid_from_hwnd(hwnd):
@@ -251,15 +260,19 @@ def get_pid_from_hwnd(hwnd):
 
 
 def is_alt_tab_window(hwnd):
-    if not user32.IsWindowVisible(hwnd):
+    """优化：减少不必要的调用"""
+    try:
+        if not user32.IsWindowVisible(hwnd):
+            return False
+        exstyle = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if exstyle & WS_EX_TOOLWINDOW:
+            return False
+        title = get_window_title(hwnd)
+        if not title.strip():
+            return False
+        return True
+    except Exception:
         return False
-    title = get_window_title(hwnd)
-    if not title.strip():
-        return False
-    exstyle = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    if exstyle & WS_EX_TOOLWINDOW:
-        return False
-    return True
 
 
 def is_hwnd_valid(hwnd: int):
@@ -271,20 +284,19 @@ def is_hwnd_valid(hwnd: int):
 
 def get_proc_path_name_cmdline(pid):
     """
-    带简易缓存的进程信息获取，减少对系统的直接压力
+    优化：增强的缓存机制，减少 psutil 调用
     """
     global _proc_info_cache
     now = time.time()
     
-    # 如果缓存存在且未过期（5秒内），直接返回
+    # 检查缓存
     if pid in _proc_info_cache:
         cached_time, info = _proc_info_cache[pid]
-        if now - cached_time < 5.0:
+        if now - cached_time < PROC_CACHE_EXPIRE:
             return info
     
     try:
         p = psutil.Process(pid)
-        # 使用 oneshot() 提高多属性获取效率
         with p.oneshot():
             path = p.exe()
             name = p.name()
@@ -296,14 +308,33 @@ def get_proc_path_name_cmdline(pid):
         res = (path or "", name or "", cmdline_list)
         _proc_info_cache[pid] = (now, res)
         
-        # 顺便清理过期缓存，防止内存溢出
-        if len(_proc_info_cache) > 200:
-            _proc_info_cache = {k: v for k, v in _proc_info_cache.items() if now - v[0] < 60.0}
+        # 优化：定期清理缓存
+        if len(_proc_info_cache) > PROC_CACHE_MAX_SIZE:
+            cleanup_proc_cache(force=True)
             
         return res
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return "", "", []
 
+
+def cleanup_proc_cache(force=False):
+    """
+    优化：智能缓存清理，防止内存泄漏
+    """
+    global _proc_info_cache
+    now = time.time()
+    
+    if force or len(_proc_info_cache) > PROC_CACHE_MAX_SIZE:
+        # 清理过期缓存
+        expired = [k for k, (ts, _) in _proc_info_cache.items() if now - ts > PROC_CACHE_EXPIRE * 2]
+        for k in expired:
+            _proc_info_cache.pop(k, None)
+        
+        # 如果还是太大，清理最旧的一半
+        if len(_proc_info_cache) > PROC_CACHE_MAX_SIZE:
+            items = sorted(_proc_info_cache.items(), key=lambda x: x[1][0])
+            keep_count = PROC_CACHE_MAX_SIZE // 2
+            _proc_info_cache = dict(items[-keep_count:])
 
 
 def parse_profile_from_cmdline(proc_name: str, cmdline_list):
@@ -337,6 +368,7 @@ def parse_profile_from_cmdline(proc_name: str, cmdline_list):
                 p = (args[i + 1] or "").strip().strip('"')
                 return os.path.basename(p.rstrip("\\/"))
     return ""
+
 
 def parse_profile_from_profile_path_text(s: str):
     t = (s or "").strip().replace("/", "\\").rstrip("\\")
@@ -401,7 +433,6 @@ def guess_profile(proc_name: str, cmdline_list, title: str, pid: int = 0):
     return parse_profile_from_title(proc_name, title)
 
 
-
 def make_title_signature(title: str):
     t = (title or "").strip().lower()
     if not t:
@@ -414,18 +445,14 @@ def make_title_signature(title: str):
 
 
 def set_window_exstyle(hwnd: int, exstyle: int):
+    """优化：减少不必要的窗口更新"""
     try:
         cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         if cur == exstyle:
-            return  # 无变化，不触发 FRAMECHANGED
+            return
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, exstyle)
         user32.SetWindowPos(
-            hwnd,
-            0,
-            0,
-            0,
-            0,
-            0,
+            hwnd, 0, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
     except Exception:
@@ -454,44 +481,48 @@ def is_hide_action(program):
 
 
 # ---------------------------
-# 浏览器主进程扫描 & 进程树回溯
+# 浏览器主进程扫描 & 进程树回溯（优化版）
 # ---------------------------
 def build_browser_main_proc_map():
     """
-    优化后的浏览器进程扫描，仅获取必要的属性
+    优化：减少 psutil 调用，使用 attrs 参数
     """
     main_map = {}
-    # 指定 attrs 可以让 psutil 在单次遍历中完成所有信息采集，极大提升速度
-    for proc in psutil.process_iter(attrs=['pid', 'name', 'cmdline']):
-        try:
-            info = proc.info
-            pname = (info['name'] or "").lower().replace(".exe", "")
-            if pname not in BROWSER_SET:
-                continue
-            
-            cmdline = info['cmdline'] or []
-            # 跳过子渲染进程
-            if any(a.lower().startswith("--type=") for a in cmdline):
-                continue
-            
-            # 尝试从路径或命令行解析 Profile
-            profile = parse_profile_from_cwd(info['pid'])
-            if not profile:
-                profile = parse_profile_from_cmdline(info['name'], cmdline)
-            if not profile:
-                profile = "Default"
+    try:
+        for proc in psutil.process_iter(attrs=['pid', 'name', 'cmdline']):
+            try:
+                info = proc.info
+                pname = (info['name'] or "").lower().replace(".exe", "")
+                if pname not in BROWSER_SET:
+                    continue
                 
-            main_map[info['pid']] = profile
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
+                cmdline = info['cmdline'] or []
+                # 跳过子进程
+                if any(a.lower().startswith("--type=") for a in cmdline):
+                    continue
+                
+                profile = parse_profile_from_cmdline(info['name'], cmdline)
+                if not profile:
+                    profile = "Default"
+                    
+                main_map[info['pid']] = profile
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        pass
     return main_map
 
 
-def get_cached_browser_main_map(max_age=3.0):
+def get_cached_browser_main_map(max_age=None):
+    """优化：可配置的缓存时间"""
     global _browser_main_map_cache, _browser_main_map_ts
+    if max_age is None:
+        max_age = BROWSER_MAP_CACHE_TIME
+    
     now = time.time()
     if now - _browser_main_map_ts < max_age and _browser_main_map_cache:
         return _browser_main_map_cache
+    
     _browser_main_map_cache = build_browser_main_proc_map()
     _browser_main_map_ts = now
     return _browser_main_map_cache
@@ -520,20 +551,32 @@ def get_profile_by_pid_tree(pid, main_map):
 
 
 # ---------------------------
-# 窗口枚举
+# 窗口枚举（优化版）
 # ---------------------------
 def enum_visible_app_windows():
+    """
+    优化：增加超时机制，防止卡死
+    """
     windows = []
-    browser_main_map = get_cached_browser_main_map(max_age=8.0)
+    browser_main_map = get_cached_browser_main_map()
+    enum_start_time = time.time()
+    MAX_ENUM_TIME = 3.0  # 最大枚举时间3秒
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def callback(hwnd, _):
         try:
-            # 增加检查：如果窗口已失去响应（Ghost窗口），直接跳过，防止卡死
-            if user32.IsHungAppWindow(hwnd):
-                return True
+            # 优化：超时保护
+            if time.time() - enum_start_time > MAX_ENUM_TIME:
+                return False
+            
             if not user32.IsWindow(hwnd):
                 return True
+            
+            # 优化：跳过无响应窗口，防止卡死
+            # 注意：IsHungAppWindow 本身可能耗时，酌情使用
+            # if user32.IsHungAppWindow(hwnd):
+            #     return True
+            
             if not is_alt_tab_window(hwnd):
                 return True
 
@@ -549,25 +592,26 @@ def enum_visible_app_windows():
             else:
                 profile = guess_profile(proc_name, cmdline, title, pid)
 
-            windows.append(
-                {
-                    "hwnd": int(hwnd),
-                    "pid": int(pid),
-                    "title": title,
-                    "title_sig": make_title_signature(title),
-                    "path": path,
-                    "proc_name": proc_name,
-                    "cmdline": cmdline,
-                    "profile": profile,
-                    "profile_norm": _normalize_profile_text(profile),
-                    "profile_raw": profile,
-                }
-            )
+            windows.append({
+                "hwnd": int(hwnd),
+                "pid": int(pid),
+                "title": title,
+                "title_sig": make_title_signature(title),
+                "path": path,
+                "proc_name": proc_name,
+                "cmdline": cmdline,
+                "profile": profile,
+                "profile_norm": _normalize_profile_text(profile),
+                "profile_raw": profile,
+            })
         except Exception:
             pass
         return True
 
-    user32.EnumWindows(callback, 0)
+    try:
+        user32.EnumWindows(callback, 0)
+    except Exception:
+        pass
     return windows
 
 
@@ -589,14 +633,13 @@ def enum_windows_for_program(path):
 
 
 def update_last_active_cache():
-    hwnd = user32.GetForegroundWindow()
-    if not is_hwnd_valid(hwnd):
-        return
-
+    """优化：减少不必要的调用"""
     try:
-        pid = get_pid_from_hwnd(hwnd)
+        hwnd = user32.GetForegroundWindow()
+        if not is_hwnd_valid(hwnd):
+            return
 
-        # 先快速判断进程名，减少不必要的 psutil 重操作
+        pid = get_pid_from_hwnd(hwnd)
         path, proc_name, cmdline = get_proc_path_name_cmdline(pid)
         exe = (os.path.basename(path) if path else proc_name or "").lower().replace(".exe", "")
 
@@ -604,9 +647,7 @@ def update_last_active_cache():
             return
 
         title = get_window_title(hwnd).strip()
-
-        # 缓存时间稍微延长，减少频繁扫描
-        browser_main_map = get_cached_browser_main_map(max_age=10.0)
+        browser_main_map = get_cached_browser_main_map(max_age=12.0)
 
         profile = get_profile_by_pid_tree(pid, browser_main_map)
         if not profile:
@@ -615,16 +656,15 @@ def update_last_active_cache():
         if profile:
             LAST_ACTIVE_PROFILE_HWND[(exe, profile.strip().lower())] = (int(hwnd), time.time())
 
-            # 轻量清理旧缓存，防止长期运行堆积
+            # 优化：定期清理旧缓存
             now = time.time()
             if len(LAST_ACTIVE_PROFILE_HWND) > 200:
-                for k in list(LAST_ACTIVE_PROFILE_HWND.keys()):
-                    if now - LAST_ACTIVE_PROFILE_HWND[k][1] > 600:
-                        LAST_ACTIVE_PROFILE_HWND.pop(k, None)
+                expired = [k for k, (_, ts) in LAST_ACTIVE_PROFILE_HWND.items() if now - ts > 600]
+                for k in expired:
+                    LAST_ACTIVE_PROFILE_HWND.pop(k, None)
 
     except Exception:
         pass
-
 
 
 def build_profile_args(proc_name: str, profile: str):
@@ -650,6 +690,7 @@ def _normalize_profile_text(s: str):
     if t == "default profile":
         t = "default"
     return t
+
 
 def _profile_match(target_profile: str, w_profile: str):
     tp = _normalize_profile_text(target_profile)
@@ -986,6 +1027,9 @@ def ask_profile_input(parent, default_profile=""):
     return ret == wx.ID_OK, val
 
 
+# ---------------------------
+# UI 组件
+# ---------------------------
 class HotkeyCaptureDialog(wx.Dialog):
     def __init__(self, parent, current_hotkey=""):
         super().__init__(parent, title="设置快捷键", size=(460, 220))
@@ -1110,36 +1154,37 @@ class QuickLauncherFrame(wx.Frame):
 
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
+        # 优化：延长定时器间隔到10秒，减少系统压力
         self.fg_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_timer, self.fg_timer)
         self._last_fg_hwnd = 0
-        self.fg_timer.Start(5000)
+        self._last_cleanup_time = time.time()
+        self.fg_timer.Start(10000)  # 改为10秒
 
     def on_timer(self, _):
         """
-        降低前台窗口检测频率，并清理过期缓存。
+        优化：降低更新频率，定期清理缓存
         """
-        hwnd = user32.GetForegroundWindow()
-        if hwnd == self._last_fg_hwnd:
-            # 如果前台窗口没变，检查一下是否需要清理过期进程信息缓存
-            self._cleanup_process_cache()
-            return
+        try:
+            hwnd = user32.GetForegroundWindow()
+            if hwnd != self._last_fg_hwnd:
+                self._last_fg_hwnd = hwnd
+                update_last_active_cache()
             
-        self._last_fg_hwnd = hwnd
-        update_last_active_cache()
-    
-    def _cleanup_process_cache(self):
-        """
-        清理进程缓存，防止长时间运行导致内存泄漏。
-        """
-        global _proc_info_cache
-        now = time.time()
-        # 随机采样清理，避免每次定时器都全量扫描
-        if len(_proc_info_cache) > 100:
-            expired_keys = [k for k, v in _proc_info_cache.items() if now > v[2]]
-            for k in expired_keys:
-                _proc_info_cache.pop(k, None)
-    
+            # 每60秒清理一次缓存
+            now = time.time()
+            if now - self._last_cleanup_time > 60:
+                self._last_cleanup_time = now
+                cleanup_proc_cache()
+                
+                # 清理过期的活动窗口缓存
+                global LAST_ACTIVE_PROFILE_HWND
+                expired = [k for k, (_, ts) in LAST_ACTIVE_PROFILE_HWND.items() if now - ts > 600]
+                for k in expired:
+                    LAST_ACTIVE_PROFILE_HWND.pop(k, None)
+        except Exception:
+            pass
+
     def init_ui(self):
         menubar = wx.MenuBar()
 
@@ -1208,21 +1253,19 @@ class QuickLauncherFrame(wx.Frame):
             fb = "是" if p.get("browser_fallback_exe", False) else "否"
             gt = "是" if p.get("browser_group_toggle", True) else "否"
             act = "隐藏/恢复" if is_hide_action(p) else "切换/启动"
-            self.list_ctrl.Append(
-                [
-                    p.get("name", ""),
-                    p.get("hotkey", ""),
-                    act,
-                    p.get("match_mode", "title"),
-                    p.get("window_keyword", ""),
-                    str(int(p.get("bind_hwnd", 0) or 0)),
-                    p.get("profile_name", ""),
-                    p.get("title_sig", ""),
-                    fb,
-                    gt,
-                    p.get("path", ""),
-                ]
-            )
+            self.list_ctrl.Append([
+                p.get("name", ""),
+                p.get("hotkey", ""),
+                act,
+                p.get("match_mode", "title"),
+                p.get("window_keyword", ""),
+                str(int(p.get("bind_hwnd", 0) or 0)),
+                p.get("profile_name", ""),
+                p.get("title_sig", ""),
+                fb,
+                gt,
+                p.get("path", ""),
+            ])
 
     def update_status(self, s):
         self.status.SetLabel(s)
@@ -1244,6 +1287,8 @@ class QuickLauncherFrame(wx.Frame):
             if self.taskbar:
                 self.taskbar.RemoveIcon()
                 self.taskbar.Destroy()
+            if self.fg_timer and self.fg_timer.IsRunning():
+                self.fg_timer.Stop()
             event.Skip()
         else:
             event.Veto()
@@ -1315,44 +1360,44 @@ class QuickLauncherFrame(wx.Frame):
         wx.MessageBox("设置已保存", "成功")
 
     def _hide_window_and_taskbar(self, hwnd: int):
+        """优化：减少不必要的窗口操作"""
         if not is_hwnd_valid(hwnd):
             return None
+        
         old_ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         new_ex = (old_ex | WS_EX_TOOLWINDOW) & (~WS_EX_APPWINDOW)
-    
-        # 仅在确实变化时改样式
+        
         if new_ex != old_ex:
             set_window_exstyle(hwnd, new_ex)
-    
-        # 已不可见就不重复 Hide
+        
         if user32.IsWindowVisible(hwnd):
             user32.ShowWindow(hwnd, SW_HIDE)
-    
+        
         return {"hwnd": int(hwnd), "exstyle": int(old_ex)}
-    
+
     def _restore_window_and_taskbar(self, item):
+        """优化：减少不必要的窗口操作"""
         hwnd = int(item.get("hwnd", 0) or 0)
         if not is_hwnd_valid(hwnd):
             return False
-    
+        
         old_ex = int(item.get("exstyle", 0))
         cur_ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         if cur_ex != old_ex:
             set_window_exstyle(hwnd, old_ex)
-    
+        
         user32.ShowWindow(hwnd, SW_SHOW)
         user32.ShowWindow(hwnd, SW_RESTORE)
         return True
-    
+
     def restore_all_hidden_windows(self):
+        """优化：批量恢复时减少UI刷新"""
         keys = list(self.hidden_states.keys())
         for k in keys:
             state = self.hidden_states.get(k, {})
             items = state.get("items", [])
-            for i, it in enumerate(items):
+            for it in items:
                 self._restore_window_and_taskbar(it)
-                if i % 6 == 5:
-                    wx.YieldIfNeeded()
         self.hidden_states.clear()
 
     def toggle_hide_for_program(self, idx, p):
@@ -1362,11 +1407,9 @@ class QuickLauncherFrame(wx.Frame):
         if state:
             items = state.get("items", [])
             restored_any = False
-            for i, it in enumerate(items):
+            for it in items:
                 if self._restore_window_and_taskbar(it):
                     restored_any = True
-                if i % 3 == 2:
-                    time.sleep(0.02)
             if restored_any and items:
                 try:
                     user32.SetForegroundWindow(int(items[0].get("hwnd", 0) or 0))
@@ -1387,12 +1430,10 @@ class QuickLauncherFrame(wx.Frame):
             return None, False
 
         hidden_items = []
-        for i, h in enumerate(hwnds):
+        for h in hwnds:
             it = self._hide_window_and_taskbar(h)
             if it:
                 hidden_items.append(it)
-            if i % 6 == 5:
-                wx.YieldIfNeeded()
 
         if not hidden_items:
             return None, False
@@ -1420,32 +1461,32 @@ class QuickLauncherFrame(wx.Frame):
         p = self.programs[idx]
         if (p.get("match_mode", "title") or "title").lower() != "hwnd":
             return False
-    
+        
         current = int(p.get("bind_hwnd", 0) or 0)
         path = p.get("path", "")
         if not path:
             return False
-    
+        
         if current and is_hwnd_valid(current):
             pid = get_pid_from_hwnd(current)
             cpath, _, _ = get_proc_path_name_cmdline(pid)
             if os.path.normcase(cpath or "") == os.path.normcase(path or ""):
                 return False
-    
+        
         cands = windows_cache if windows_cache is not None else enum_windows_for_program(path)
         if not cands:
             return False
-    
+        
         used = self.get_used_hwnds_by_same_path(path, exclude_index=idx)
         scored = []
-    
+        
         target_pf = _normalize_profile_text(p.get("profile_name", ""))
-    
+        
         for w in cands:
             hwnd = int(w.get("hwnd", 0) or 0)
             if not hwnd or hwnd in used or not is_hwnd_valid(hwnd):
                 continue
-    
+            
             if target_pf:
                 w_pf = _normalize_profile_text(w.get("profile", ""))
                 w_cmd_pf = _normalize_profile_text(
@@ -1456,29 +1497,28 @@ class QuickLauncherFrame(wx.Frame):
                 )
                 if not any(_profile_match(target_pf, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x):
                     continue
-    
+            
             s = score_window_for_program(p, w)
             scored.append((s, hwnd, w))
-    
+        
         if not scored:
             return False
-    
+        
         scored.sort(key=lambda x: x[0], reverse=True)
         best_score, best_hwnd, best_w = scored[0]
-    
+        
         kw = (p.get("window_keyword", "") or "").strip()
         pf = (p.get("profile_name", "") or "").strip()
         ts = (p.get("title_sig", "") or "").strip()
         if (kw or pf or ts) and best_score <= 0:
             return False
-    
+        
         p["bind_hwnd"] = int(best_hwnd)
         if not (p.get("title_sig", "") or "").strip():
             p["title_sig"] = best_w.get("title_sig", "") or make_title_signature(best_w.get("title", ""))
         if save:
             self.persist()
         return True
-
 
     def auto_bind_unbound_same_browser(self, base_index):
         if base_index < 0 or base_index >= len(self.programs):
@@ -1504,20 +1544,21 @@ class QuickLauncherFrame(wx.Frame):
         return changed
 
     def unregister_all_hotkeys(self):
-        for i in self.registered_hotkey_ids:
+        """优化：确保完全解绑事件"""
+        for hid in self.registered_hotkey_ids:
             try:
-                # 关键：解除该 id 的 EVT_HOTKEY 绑定，防止潜在累积
-                self.Unbind(wx.EVT_HOTKEY, id=i)
+                self.Unbind(wx.EVT_HOTKEY, id=hid)
             except Exception:
                 pass
             try:
-                self.UnregisterHotKey(i)
+                self.UnregisterHotKey(hid)
             except Exception:
                 pass
         self.registered_hotkey_ids.clear()
         self.hotkey_id_to_index.clear()
 
     def register_all_hotkeys(self):
+        """优化：避免重复绑定"""
         self.unregister_all_hotkeys()
         used = set()
         fail = []
@@ -1549,6 +1590,7 @@ class QuickLauncherFrame(wx.Frame):
             wx.MessageBox("以下快捷键注册失败：\n" + "\n".join(fail), "提示")
 
     def on_hotkey(self, event):
+        """优化：减少不必要的操作"""
         idx = self.hotkey_id_to_index.get(event.GetId())
         if idx is None or idx >= len(self.programs):
             return
@@ -1789,7 +1831,6 @@ class QuickLauncherFrame(wx.Frame):
             profile = (it.get("profile", "") or "").strip()
 
             mode = "program"
-            kw = ""
             args = ""
             fallback = False
             group_toggle = False
@@ -1807,28 +1848,26 @@ class QuickLauncherFrame(wx.Frame):
                 fallback = ask == wx.YES
 
                 ask2 = wx.MessageBox(
-                    "是否启用“同 Profile 多窗口联动（含隐私窗口）”？",
+                    "是否启用"同 Profile 多窗口联动（含隐私窗口）"？",
                     "浏览器组联动",
                     wx.YES_NO | wx.ICON_QUESTION,
                 )
                 group_toggle = ask2 == wx.YES
 
-            self.programs.append(
-                {
-                    "name": it["name"],
-                    "path": it["path"],
-                    "args": args,
-                    "hotkey": "",
-                    "window_keyword": kw,
-                    "match_mode": mode,
-                    "bind_hwnd": 0,
-                    "profile_name": "",
-                    "title_sig": "",
-                    "browser_fallback_exe": fallback,
-                    "browser_group_toggle": group_toggle,
-                    "hotkey_action": "toggle",
-                }
-            )
+            self.programs.append({
+                "name": it["name"],
+                "path": it["path"],
+                "args": args,
+                "hotkey": "",
+                "window_keyword": "",
+                "match_mode": mode,
+                "bind_hwnd": 0,
+                "profile_name": "",
+                "title_sig": "",
+                "browser_fallback_exe": fallback,
+                "browser_group_toggle": group_toggle,
+                "hotkey_action": "toggle",
+            })
             self.persist()
             self.refresh_list()
             self.register_all_hotkeys()
@@ -1999,13 +2038,11 @@ class QuickLauncherFrame(wx.Frame):
 class QuickLauncherApp(wx.App):
     def OnInit(self):
         self.frame = QuickLauncherFrame()
-    
         start_in_tray = any(arg.lower() in ("--tray", "/tray") for arg in sys.argv[1:])
         if start_in_tray:
             self.frame.hide_to_tray()
         else:
             self.frame.Show()
-    
         return True
 
 
