@@ -1848,7 +1848,7 @@ class QuickLauncherFrame(wx.Frame):
                 fallback = ask == wx.YES
 
                 ask2 = wx.MessageBox(
-                    '是否启用"同 Profile 多窗口联动（含隐私窗口）"？',
+                    "是否启用“同 Profile 多窗口联动（含隐私窗口）”？",
                     "浏览器组联动",
                     wx.YES_NO | wx.ICON_QUESTION,
                 )
