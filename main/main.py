@@ -8,7 +8,7 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 __author__ = "laozi4vip"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
 __app_name__ = "QuickLauncher"
-__version__ = "3.5"
+__version__ = "3.6"
 __description__ = "Windows 任务栏快捷启动器"
 
 import wx
@@ -63,6 +63,8 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+
+_proc_info_cache = {}
 
 LAST_ACTIVE_PROFILE_HWND = {}
 
@@ -268,17 +270,40 @@ def is_hwnd_valid(hwnd: int):
 
 
 def get_proc_path_name_cmdline(pid):
+    """
+    带简易缓存的进程信息获取，减少对系统的直接压力
+    """
+    global _proc_info_cache
+    now = time.time()
+    
+    # 如果缓存存在且未过期（5秒内），直接返回
+    if pid in _proc_info_cache:
+        cached_time, info = _proc_info_cache[pid]
+        if now - cached_time < 5.0:
+            return info
+    
     try:
         p = psutil.Process(pid)
-        path = p.exe() or ""
-        name = p.name() or ""
-        try:
-            cmdline_list = p.cmdline()
-        except Exception:
-            cmdline_list = []
-        return path, name, cmdline_list
-    except Exception:
+        # 使用 oneshot() 提高多属性获取效率
+        with p.oneshot():
+            path = p.exe()
+            name = p.name()
+            try:
+                cmdline_list = p.cmdline()
+            except (psutil.AccessDenied, psutil.ZombieProcess):
+                cmdline_list = []
+        
+        res = (path or "", name or "", cmdline_list)
+        _proc_info_cache[pid] = (now, res)
+        
+        # 顺便清理过期缓存，防止内存溢出
+        if len(_proc_info_cache) > 200:
+            _proc_info_cache = {k: v for k, v in _proc_info_cache.items() if now - v[0] < 60.0}
+            
+        return res
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
         return "", "", []
+
 
 
 def parse_profile_from_cmdline(proc_name: str, cmdline_list):
@@ -432,24 +457,31 @@ def is_hide_action(program):
 # 浏览器主进程扫描 & 进程树回溯
 # ---------------------------
 def build_browser_main_proc_map():
+    """
+    优化后的浏览器进程扫描，仅获取必要的属性
+    """
     main_map = {}
-    for proc in psutil.process_iter(["pid", "name"]):
+    # 指定 attrs 可以让 psutil 在单次遍历中完成所有信息采集，极大提升速度
+    for proc in psutil.process_iter(attrs=['pid', 'name', 'cmdline']):
         try:
-            pname = (proc.name() or "").lower().replace(".exe", "")
+            info = proc.info
+            pname = (info['name'] or "").lower().replace(".exe", "")
             if pname not in BROWSER_SET:
                 continue
-            try:
-                cmdline = proc.cmdline()
-            except (psutil.AccessDenied, psutil.ZombieProcess):
-                continue
+            
+            cmdline = info['cmdline'] or []
+            # 跳过子渲染进程
             if any(a.lower().startswith("--type=") for a in cmdline):
                 continue
-            profile = parse_profile_from_cwd(proc.pid)
+            
+            # 尝试从路径或命令行解析 Profile
+            profile = parse_profile_from_cwd(info['pid'])
             if not profile:
-                profile = parse_profile_from_cmdline(proc.name(), cmdline)
+                profile = parse_profile_from_cmdline(info['name'], cmdline)
             if not profile:
                 profile = "Default"
-            main_map[proc.pid] = profile
+                
+            main_map[info['pid']] = profile
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return main_map
@@ -497,6 +529,9 @@ def enum_visible_app_windows():
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def callback(hwnd, _):
         try:
+            # 增加检查：如果窗口已失去响应（Ghost窗口），直接跳过，防止卡死
+            if user32.IsHungAppWindow(hwnd):
+                return True
             if not user32.IsWindow(hwnd):
                 return True
             if not is_alt_tab_window(hwnd):
@@ -1081,12 +1116,30 @@ class QuickLauncherFrame(wx.Frame):
         self.fg_timer.Start(5000)
 
     def on_timer(self, _):
+        """
+        降低前台窗口检测频率，并清理过期缓存。
+        """
         hwnd = user32.GetForegroundWindow()
         if hwnd == self._last_fg_hwnd:
+            # 如果前台窗口没变，检查一下是否需要清理过期进程信息缓存
+            self._cleanup_process_cache()
             return
+            
         self._last_fg_hwnd = hwnd
         update_last_active_cache()
-
+    
+    def _cleanup_process_cache(self):
+        """
+        清理进程缓存，防止长时间运行导致内存泄漏。
+        """
+        global _proc_info_cache
+        now = time.time()
+        # 随机采样清理，避免每次定时器都全量扫描
+        if len(_proc_info_cache) > 100:
+            expired_keys = [k for k, v in _proc_info_cache.items() if now > v[2]]
+            for k in expired_keys:
+                _proc_info_cache.pop(k, None)
+    
     def init_ui(self):
         menubar = wx.MenuBar()
 
