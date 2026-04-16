@@ -282,14 +282,14 @@ def is_hwnd_valid(hwnd: int):
         return False
 
 
+# ---------------------------
+# 优化缓存清理：增加阈值，减少触发频率
+# ---------------------------
 def get_proc_path_name_cmdline(pid):
-    """
-    优化：增强的缓存机制，减少 psutil 调用
-    """
+    """优化：提高缓存阈值，减少清理频率"""
     global _proc_info_cache
     now = time.time()
     
-    # 检查缓存
     if pid in _proc_info_cache:
         cached_time, info = _proc_info_cache[pid]
         if now - cached_time < PROC_CACHE_EXPIRE:
@@ -308,8 +308,8 @@ def get_proc_path_name_cmdline(pid):
         res = (path or "", name or "", cmdline_list)
         _proc_info_cache[pid] = (now, res)
         
-        # 优化：定期清理缓存
-        if len(_proc_info_cache) > PROC_CACHE_MAX_SIZE:
+        # 提高阈值到500，降低清理频率
+        if len(_proc_info_cache) > 500:
             cleanup_proc_cache(force=True)
             
         return res
@@ -480,25 +480,29 @@ def is_hide_action(program):
     return (program.get("hotkey_action", "toggle") or "toggle").strip().lower() == "hide"
 
 
+
 # ---------------------------
-# 浏览器主进程扫描 & 进程树回溯（优化版）
+# 优化浏览器映射缓存：使用批量获取减少开销
 # ---------------------------
 def build_browser_main_proc_map():
-    """
-    优化：减少 psutil 调用，使用 attrs 参数
-    """
+    """优化：使用 process_iter 的 attrs 参数，一次性获取"""
     main_map = {}
     try:
-        for proc in psutil.process_iter(attrs=['pid', 'name', 'cmdline']):
+        # 批量获取，减少系统调用
+        attrs = ['pid', 'name', 'cmdline']
+        for proc in psutil.process_iter(attrs=attrs, ad_value=None):
             try:
                 info = proc.info
-                pname = (info['name'] or "").lower().replace(".exe", "")
+                if not info or not info.get('name'):
+                    continue
+                    
+                pname = info['name'].lower().replace(".exe", "")
                 if pname not in BROWSER_SET:
                     continue
                 
-                cmdline = info['cmdline'] or []
-                # 跳过子进程
-                if any(a.lower().startswith("--type=") for a in cmdline):
+                cmdline = info.get('cmdline') or []
+                # 快速跳过子进程
+                if any('--type=' in str(a).lower() for a in cmdline):
                     continue
                 
                 profile = parse_profile_from_cmdline(info['name'], cmdline)
@@ -506,18 +510,21 @@ def build_browser_main_proc_map():
                     profile = "Default"
                     
                 main_map[info['pid']] = profile
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError):
                 continue
     except Exception:
         pass
     return main_map
 
 
+# ---------------------------
+# 调整浏览器映射缓存时间
+# ---------------------------
 def get_cached_browser_main_map(max_age=None):
-    """优化：可配置的缓存时间"""
+    """优化：降低缓存时间到3秒，提高准确性"""
     global _browser_main_map_cache, _browser_main_map_ts
     if max_age is None:
-        max_age = BROWSER_MAP_CACHE_TIME
+        max_age = BROWSER_MAP_CACHE_TIME  # 现在是3秒
     
     now = time.time()
     if now - _browser_main_map_ts < max_age and _browser_main_map_cache:
@@ -526,7 +533,6 @@ def get_cached_browser_main_map(max_age=None):
     _browser_main_map_cache = build_browser_main_proc_map()
     _browser_main_map_ts = now
     return _browser_main_map_cache
-
 
 def get_profile_by_pid_tree(pid, main_map):
     if pid in main_map:
@@ -554,28 +560,15 @@ def get_profile_by_pid_tree(pid, main_map):
 # 窗口枚举（优化版）
 # ---------------------------
 def enum_visible_app_windows():
-    """
-    优化：增加超时机制，防止卡死
-    """
+    """移除每次回调的time.time()调用，提升性能"""
     windows = []
     browser_main_map = get_cached_browser_main_map()
-    enum_start_time = time.time()
-    MAX_ENUM_TIME = 3.0  # 最大枚举时间3秒
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def callback(hwnd, _):
         try:
-            # 优化：超时保护
-            if time.time() - enum_start_time > MAX_ENUM_TIME:
-                return False
-            
             if not user32.IsWindow(hwnd):
                 return True
-            
-            # 优化：跳过无响应窗口，防止卡死
-            # 注意：IsHungAppWindow 本身可能耗时，酌情使用
-            # if user32.IsHungAppWindow(hwnd):
-            #     return True
             
             if not is_alt_tab_window(hwnd):
                 return True
@@ -1154,37 +1147,45 @@ class QuickLauncherFrame(wx.Frame):
 
         self.Bind(wx.EVT_CLOSE, self.on_close)
 
-        # 优化：延长定时器间隔到10秒，减少系统压力
+        # 2秒定时器
         self.fg_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_timer, self.fg_timer)
         self._last_fg_hwnd = 0
         self._last_cleanup_time = time.time()
-        self.fg_timer.Start(10000)  # 改为10秒
+        self._cleanup_counter = 0
+        self.fg_timer.Start(2000)  # 2秒一次
 
     def on_timer(self, _):
-        """
-        优化：降低更新频率，定期清理缓存
-        """
+        """优化：异步清理，避免阻塞"""
         try:
             hwnd = user32.GetForegroundWindow()
             if hwnd != self._last_fg_hwnd:
                 self._last_fg_hwnd = hwnd
                 update_last_active_cache()
             
-            # 每60秒清理一次缓存
-            now = time.time()
-            if now - self._last_cleanup_time > 60:
-                self._last_cleanup_time = now
-                cleanup_proc_cache()
-                
-                # 清理过期的活动窗口缓存
-                global LAST_ACTIVE_PROFILE_HWND
-                expired = [k for k, (_, ts) in LAST_ACTIVE_PROFILE_HWND.items() if now - ts > 600]
-                for k in expired:
-                    LAST_ACTIVE_PROFILE_HWND.pop(k, None)
+            # 每30秒清理一次（每15次定时器触发）
+            self._cleanup_counter += 1
+            if self._cleanup_counter >= 15:
+                self._cleanup_counter = 0
+                # 使用 CallAfter 异步清理，不阻塞主线程
+                wx.CallAfter(self._async_cleanup)
         except Exception:
             pass
-
+    def _async_cleanup(self):
+        """异步缓存清理，避免卡顿"""
+        try:
+            cleanup_proc_cache()
+            
+            # 清理过期的活动窗口缓存
+            global LAST_ACTIVE_PROFILE_HWND
+            now = time.time()
+            expired = [k for k, (_, ts) in LAST_ACTIVE_PROFILE_HWND.items() 
+                      if now - ts > 600]
+            for k in expired:
+                LAST_ACTIVE_PROFILE_HWND.pop(k, None)
+        except Exception:
+            pass
+            
     def init_ui(self):
         menubar = wx.MenuBar()
 
