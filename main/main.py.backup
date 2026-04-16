@@ -8,7 +8,7 @@ GitHub：https://github.com/laozi4vip/QuickLauncher
 __author__ = "laozi4vip"
 __github__ = "https://github.com/laozi4vip/QuickLauncher"
 __app_name__ = "QuickLauncher"
-__version__ = "3.4"
+__version__ = "3.5"
 __description__ = "Windows 任务栏快捷启动器"
 
 import wx
@@ -492,7 +492,7 @@ def get_profile_by_pid_tree(pid, main_map):
 # ---------------------------
 def enum_visible_app_windows():
     windows = []
-    browser_main_map = get_cached_browser_main_map(max_age=2.0)
+    browser_main_map = get_cached_browser_main_map(max_age=8.0)
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def callback(hwnd, _):
@@ -528,7 +528,6 @@ def enum_visible_app_windows():
                     "profile_raw": profile,
                 }
             )
-            
         except Exception:
             pass
         return True
@@ -558,21 +557,39 @@ def update_last_active_cache():
     hwnd = user32.GetForegroundWindow()
     if not is_hwnd_valid(hwnd):
         return
+
     try:
         pid = get_pid_from_hwnd(hwnd)
+
+        # 先快速判断进程名，减少不必要的 psutil 重操作
         path, proc_name, cmdline = get_proc_path_name_cmdline(pid)
+        exe = (os.path.basename(path) if path else proc_name or "").lower().replace(".exe", "")
+
+        if exe not in BROWSER_SET:
+            return
+
         title = get_window_title(hwnd).strip()
 
-        exe = (os.path.basename(path) if path else proc_name or "").lower().replace(".exe", "")
-        if exe in BROWSER_SET:
-            browser_main_map = get_cached_browser_main_map(max_age=5.0)
-            profile = get_profile_by_pid_tree(pid, browser_main_map)
-            if not profile:
-                profile = guess_profile(proc_name, cmdline, title, pid)
-            if profile:
-                LAST_ACTIVE_PROFILE_HWND[(exe, profile.strip().lower())] = (int(hwnd), time.time())
+        # 缓存时间稍微延长，减少频繁扫描
+        browser_main_map = get_cached_browser_main_map(max_age=10.0)
+
+        profile = get_profile_by_pid_tree(pid, browser_main_map)
+        if not profile:
+            profile = guess_profile(proc_name, cmdline, title, pid)
+
+        if profile:
+            LAST_ACTIVE_PROFILE_HWND[(exe, profile.strip().lower())] = (int(hwnd), time.time())
+
+            # 轻量清理旧缓存，防止长期运行堆积
+            now = time.time()
+            if len(LAST_ACTIVE_PROFILE_HWND) > 200:
+                for k in list(LAST_ACTIVE_PROFILE_HWND.keys()):
+                    if now - LAST_ACTIVE_PROFILE_HWND[k][1] > 600:
+                        LAST_ACTIVE_PROFILE_HWND.pop(k, None)
+
     except Exception:
         pass
+
 
 
 def build_profile_args(proc_name: str, profile: str):
@@ -1061,7 +1078,7 @@ class QuickLauncherFrame(wx.Frame):
         self.fg_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_timer, self.fg_timer)
         self._last_fg_hwnd = 0
-        self.fg_timer.Start(3000)
+        self.fg_timer.Start(5000)
 
     def on_timer(self, _):
         hwnd = user32.GetForegroundWindow()
@@ -1274,7 +1291,6 @@ class QuickLauncherFrame(wx.Frame):
         user32.ShowWindow(hwnd, SW_RESTORE)
         return True
     
-
     def restore_all_hidden_windows(self):
         keys = list(self.hidden_states.keys())
         for k in keys:
@@ -1282,8 +1298,8 @@ class QuickLauncherFrame(wx.Frame):
             items = state.get("items", [])
             for i, it in enumerate(items):
                 self._restore_window_and_taskbar(it)
-                if i % 3 == 2:
-                    time.sleep(0.02)
+                if i % 6 == 5:
+                    wx.YieldIfNeeded()
         self.hidden_states.clear()
 
     def toggle_hide_for_program(self, idx, p):
@@ -1322,8 +1338,8 @@ class QuickLauncherFrame(wx.Frame):
             it = self._hide_window_and_taskbar(h)
             if it:
                 hidden_items.append(it)
-            if i % 3 == 2:
-                time.sleep(0.02)  # 20ms 节流
+            if i % 6 == 5:
+                wx.YieldIfNeeded()
 
         if not hidden_items:
             return None, False
