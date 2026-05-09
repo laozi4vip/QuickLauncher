@@ -1084,10 +1084,10 @@ def get_icon_path():
 
 
 # ======================================================
-# 第二部分（GUI 类 + 主入口）—— 续
+# 第二部分（GUI 类 + 主入口）
 # ======================================================
 
-class HotkeyCaptureDialog(wx.Dialog):
+class HotkeyCaptureDialogclass HotkeyCaptureDialog(wx.Dialog):
     def __init__(self, parent, current_hotkey=""):
         super().__init__(parent, title="设置快捷键", size=(460, 220))
         self.captured_hotkey = normalize_hotkey(current_hotkey)
@@ -1135,6 +1135,7 @@ def get_icon_path():
         base = os.path.dirname(sys.executable)
     else:
         base = BASE_DIR
+
     for ext in ["icon.ico", "icon.png"]:
         icon_path = os.path.join(base, ext)
         if os.path.exists(icon_path):
@@ -1145,9 +1146,6 @@ def get_icon_path():
     return None
 
 
-# ---------------------------
-# 托盘图标
-# ---------------------------
 class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
     def __init__(self, frame):
         super().__init__()
@@ -1165,634 +1163,935 @@ class QuickLauncherTaskBar(wx.adv.TaskBarIcon):
             icon = wx.Icon()
             icon.CopyFromBitmap(bmp)
         self.SetIcon(icon, f"{__app_name__} v{__version__}")
-        self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, self.on_left_dclick)
-
-    def on_left_dclick(self, _):
-        self.frame.show_main_window()
+        self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, lambda e: self.frame.show_from_tray())
 
     def CreatePopupMenu(self):
         menu = wx.Menu()
-        item_show = menu.Append(wx.ID_ANY, "打开主窗口")
-        item_quit = menu.Append(wx.ID_ANY, "退出")
-        self.Bind(wx.EVT_MENU, lambda e: self.frame.show_main_window(), item_show)
-        self.Bind(wx.EVT_MENU, lambda e: self.frame.on_quit(e), item_quit)
+        s = menu.Append(wx.ID_ANY, "显示主窗口")
+        h = menu.Append(wx.ID_ANY, "隐藏到托盘")
+        menu.AppendSeparator()
+        about = menu.Append(wx.ID_ABOUT, f"关于 QuickLauncher v{__version__}")
+        menu.AppendSeparator()
+        x = menu.Append(wx.ID_EXIT, "退出")
+        self.Bind(wx.EVT_MENU, lambda e: self.frame.show_from_tray(), s)
+        self.Bind(wx.EVT_MENU, lambda e: self.frame.hide_to_tray(), h)
+        self.Bind(wx.EVT_MENU, lambda e: self.frame.on_about(None), about)
+        self.Bind(wx.EVT_MENU, lambda e: self.frame.exit_app(), x)
         return menu
 
 
-# ---------------------------
-# 隐藏窗口管理器（hide 动作）
-# ---------------------------
-class HiddenWindowManager:
-    """管理被 hide 动作隐藏的窗口，支持恢复"""
-
-    def __init__(self):
-        self._hidden = {}  # key -> list of (hwnd, original_exstyle)
-
-    def hide_windows(self, key: str, hwnds: list):
-        records = []
-        for h in hwnds:
-            if not is_hwnd_valid(h):
-                continue
-            try:
-                orig_ex = user32.GetWindowLongW(h, GWL_EXSTYLE)
-                user32.ShowWindow(h, SW_HIDE)
-                # [FIX] 不批量发 SWP_FRAMECHANGED，仅在必要时修改 exstyle
-                new_ex = (orig_ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
-                if new_ex != orig_ex:
-                    user32.SetWindowLongW(h, GWL_EXSTYLE, new_ex)
-                records.append((h, orig_ex))
-            except Exception:
-                pass
-        if records:
-            self._hidden[key] = records
-            invalidate_enum_cache()
-        return len(records) > 0
-
-    def restore_windows(self, key: str):
-        records = self._hidden.pop(key, [])
-        if not records:
-            return False
-        last_valid = None
-        for h, orig_ex in records:
-            if not is_hwnd_valid(h):
-                continue
-            try:
-                user32.SetWindowLongW(h, GWL_EXSTYLE, orig_ex)
-                user32.ShowWindow(h, SW_SHOW)
-                if user32.IsIconic(h):
-                    user32.ShowWindow(h, SW_RESTORE)
-                last_valid = h
-            except Exception:
-                pass
-        # [FIX] 只对最后一个窗口发一次 FRAMECHANGED 通知
-        if last_valid and is_hwnd_valid(last_valid):
-            try:
-                user32.SetWindowPos(
-                    last_valid, 0, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                )
-                user32.SetForegroundWindow(last_valid)
-            except Exception:
-                pass
-        invalidate_enum_cache()
-        return True
-
-    def is_hidden(self, key: str) -> bool:
-        records = self._hidden.get(key, [])
-        return any(is_hwnd_valid(h) for h, _ in records)
-
-    def cleanup_stale(self):
-        """清理已失效的句柄"""
-        stale_keys = []
-        for key, records in self._hidden.items():
-            if not any(is_hwnd_valid(h) for h, _ in records):
-                stale_keys.append(key)
-        for k in stale_keys:
-            self._hidden.pop(k, None)
-
-    def restore_all(self):
-        for key in list(self._hidden.keys()):
-            self.restore_windows(key)
-
-
-# ---------------------------
-# 主窗口
-# ---------------------------
 class QuickLauncherFrame(wx.Frame):
+    def __init__(self):
+        super().__init__(None, title=f"{__app_name__} v{__version__}", size=(1280, 680))
 
-    # [FIX] 热键防抖间隔（秒）
-    HOTKEY_DEBOUNCE = 0.35
+        icon_path = get_icon_path()
+        if icon_path and os.path.exists(icon_path):
+            if icon_path.endswith(".png"):
+                bmp = wx.Bitmap(icon_path, wx.BITMAP_TYPE_PNG)
+                icon = wx.Icon()
+                icon.CopyFromBitmap(bmp)
+                self.SetIcon(icon)
+            else:
+                self.SetIcon(wx.Icon(icon_path, wx.BITMAP_TYPE_ICO))
 
-    def __init__(self, start_hidden=False):
-        super().__init__(
-            None,
-            title=f"{__app_name__} v{__version__} - {__description__}",
-            size=(900, 520),
-            style=wx.DEFAULT_FRAME_STYLE,
-        )
-        self.SetMinSize((720, 400))
+        cfg = load_config()
+        self.programs = cfg["programs"]
+        self.autostart = cfg["autostart"]
+        self.hotkey_id_to_index = {}
+        self.registered_hotkey_ids = []
+        self.exiting = False
+        self.hidden_states = {}
+
+        self.init_ui()
         self.Centre()
 
-        # 数据
-        config = load_config()
-        self.programs = config["programs"]
-        self.autostart = config["autostart"]
-
-        # 热键管理
-        self._hotkey_ids = {}       # id -> (mod, vk, normalized)
-        self._hotkey_id_counter = 0x7000
-
-        # [FIX] 热键防抖时间戳
-        self._last_hotkey_ts = {}   # hotkey_id -> float
-
-        # 隐藏窗口管理器
-        self.hidden_mgr = HiddenWindowManager()
-
-        # [FIX] 定时器 ID
-        self._profile_timer_id = wx.NewIdRef()
-        self._cleanup_timer_id = wx.NewIdRef()
-        self._timers_started = False
-
-        # 托盘
         self.taskbar = QuickLauncherTaskBar(self)
+        self.refresh_list()
+        self.register_all_hotkeys()
 
-        # 构建 UI
-        self._build_ui()
-
-        # 注册热键
-        self._register_all_hotkeys()
-
-        # [FIX] 使用 wx.Timer 代替 threading.Timer / time.sleep
-        self._start_timers()
-
-        # 绑定事件
         self.Bind(wx.EVT_CLOSE, self.on_close)
-        self.Bind(wx.EVT_HOTKEY, self.on_hotkey)
 
-        if start_hidden:
-            self.Hide()
-        else:
-            self.Show()
+        self.fg_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self.on_timer, self.fg_timer)
+        self._last_fg_hwnd = 0
+        self.fg_timer.Start(5000)
 
-    # ---------- UI 构建 ----------
-
-    def _build_ui(self):
-        panel = wx.Panel(self)
-        main_sizer = wx.BoxSizer(wx.VERTICAL)
-
-        # 工具栏按钮
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_add = wx.Button(panel, label="➕ 添加")
-        self.btn_edit = wx.Button(panel, label="✏️ 编辑")
-        self.btn_del = wx.Button(panel, label="🗑️ 删除")
-        self.btn_up = wx.Button(panel, label="⬆ 上移")
-        self.btn_down = wx.Button(panel, label="⬇ 下移")
-        self.cb_autostart = wx.CheckBox(panel, label="开机自启")
-        self.cb_autostart.SetValue(self.autostart)
-
-        for b in (self.btn_add, self.btn_edit, self.btn_del, self.btn_up, self.btn_down):
-            btn_sizer.Add(b, 0, wx.ALL, 3)
-        btn_sizer.AddStretchSpacer()
-        btn_sizer.Add(self.cb_autostart, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 3)
-
-        main_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 5)
-
-        # 列表
-        self.list_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        cols = [
-            ("名称", 120), ("程序路径", 200), ("参数", 100),
-            ("快捷键", 100), ("匹配模式", 80), ("窗口关键字", 100),
-            ("Profile", 80), ("动作", 60),
-        ]
-        for i, (name, w) in enumerate(cols):
-            self.list_ctrl.InsertColumn(i, name, width=w)
-        main_sizer.Add(self.list_ctrl, 1, wx.EXPAND | wx.ALL, 5)
-
-        panel.SetSizer(main_sizer)
-
-        # 事件绑定
-        self.btn_add.Bind(wx.EVT_BUTTON, self.on_add)
-        self.btn_edit.Bind(wx.EVT_BUTTON, self.on_edit)
-        self.btn_del.Bind(wx.EVT_BUTTON, self.on_delete)
-        self.btn_up.Bind(wx.EVT_BUTTON, self.on_move_up)
-        self.btn_down.Bind(wx.EVT_BUTTON, self.on_move_down)
-        self.cb_autostart.Bind(wx.EVT_CHECKBOX, self.on_autostart_toggle)
-        self.list_ctrl.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_edit)
-
-        self._refresh_list()
-
-    def _refresh_list(self):
-        self.list_ctrl.DeleteAllItems()
-        for i, p in enumerate(self.programs):
-            idx = self.list_ctrl.InsertItem(i, p.get("name", ""))
-            self.list_ctrl.SetItem(idx, 1, p.get("path", ""))
-            self.list_ctrl.SetItem(idx, 2, p.get("args", ""))
-            self.list_ctrl.SetItem(idx, 3, p.get("hotkey", ""))
-            self.list_ctrl.SetItem(idx, 4, p.get("match_mode", "title"))
-            self.list_ctrl.SetItem(idx, 5, p.get("window_keyword", ""))
-            self.list_ctrl.SetItem(idx, 6, p.get("profile_name", ""))
-            action = p.get("hotkey_action", "toggle")
-            self.list_ctrl.SetItem(idx, 7, action)
-
-    # ---------- 定时器 [FIX] ----------
-
-    def _start_timers(self):
-        """使用 wx.Timer 替代阻塞式 sleep"""
-        if self._timers_started:
+    def on_timer(self, _):
+        hwnd = user32.GetForegroundWindow()
+        if hwnd == self._last_fg_hwnd:
             return
+        self._last_fg_hwnd = hwnd
+        update_last_active_cache()
 
-        # Profile 活跃窗口缓存更新 - 每 3 秒
-        self._profile_timer = wx.Timer(self, self._profile_timer_id)
-        self.Bind(wx.EVT_TIMER, self._on_profile_timer, id=self._profile_timer_id)
-        self._profile_timer.Start(3000)
+    def init_ui(self):
+        menubar = wx.MenuBar()
 
-        # 失效隐藏句柄清理 - 每 30 秒
-        self._cleanup_timer = wx.Timer(self, self._cleanup_timer_id)
-        self.Bind(wx.EVT_TIMER, self._on_cleanup_timer, id=self._cleanup_timer_id)
-        self._cleanup_timer.Start(30000)
+        help_menu = wx.Menu()
+        check_update_item = help_menu.Append(wx.ID_ANY, "检查更新", "检查是否有新版本")
+        self.Bind(wx.EVT_MENU, self.check_for_updates, check_update_item)
+        about_item = help_menu.Append(wx.ID_ABOUT, f"关于 {__app_name__}", "关于本软件")
+        self.Bind(wx.EVT_MENU, self.on_about, about_item)
+        help_menu.AppendSeparator()
+        exit_item = help_menu.Append(wx.ID_EXIT, "退出", "退出程序")
+        self.Bind(wx.EVT_MENU, self.exit_app, exit_item)
 
-        self._timers_started = True
+        menubar.Append(help_menu, "帮助")
+        self.SetMenuBar(menubar)
 
-    def _stop_timers(self):
-        """[FIX] 退出时必须停止定时器"""
-        if hasattr(self, "_profile_timer"):
-            self._profile_timer.Stop()
-        if hasattr(self, "_cleanup_timer"):
-            self._cleanup_timer.Stop()
-        self._timers_started = False
+        panel = wx.Panel(self)
+        root = wx.BoxSizer(wx.VERTICAL)
 
-    def _on_profile_timer(self, _):
+        self.list_ctrl = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        self.list_ctrl.InsertColumn(0, "名称", width=120)
+        self.list_ctrl.InsertColumn(1, "快捷键", width=120)
+        self.list_ctrl.InsertColumn(2, "动作", width=110)
+        self.list_ctrl.InsertColumn(3, "模式", width=90)
+        self.list_ctrl.InsertColumn(4, "关键词", width=150)
+        self.list_ctrl.InsertColumn(5, "HWND", width=100)
+        self.list_ctrl.InsertColumn(6, "Profile", width=120)
+        self.list_ctrl.InsertColumn(7, "TitleSig", width=160)
+        self.list_ctrl.InsertColumn(8, "浏览器兜底", width=90)
+        self.list_ctrl.InsertColumn(9, "组联动", width=80)
+        self.list_ctrl.InsertColumn(10, "路径", width=300)
+        root.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 8)
+
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        for label, fn in [
+            ("手动添加", self.on_manual_add),
+            ("从运行窗口添加", self.on_add_from_running),
+            ("删除", self.on_delete),
+            ("设置快捷键", self.on_set_hotkey),
+            ("设置匹配", self.on_set_match),
+            ("最小化到托盘", lambda e: self.hide_to_tray()),
+        ]:
+            b = wx.Button(panel, label=label)
+            b.Bind(wx.EVT_BUTTON, fn)
+            row.Add(b, 0, wx.ALL, 4)
+        root.Add(row, 0, wx.ALIGN_CENTER)
+
+        row2 = wx.BoxSizer(wx.HORIZONTAL)
+        self.autostart_cb = wx.CheckBox(panel, label="开机自启")
+        self.autostart_cb.SetValue(self.autostart)
+        row2.Add(self.autostart_cb, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
+        save_btn = wx.Button(panel, label="保存设置")
+        save_btn.Bind(wx.EVT_BUTTON, self.on_apply_settings)
+        row2.Add(save_btn, 0, wx.ALL, 6)
+        root.Add(row2, 0, wx.ALIGN_CENTER)
+
+        self.status = wx.StaticText(panel, label="就绪")
+        root.Add(self.status, 0, wx.ALL | wx.ALIGN_CENTER, 6)
+        panel.SetSizer(root)
+
+    def persist(self):
+        save_config(self.programs, self.autostart_cb.GetValue())
+
+    def refresh_list(self):
+        self.list_ctrl.DeleteAllItems()
+        for p in self.programs:
+            fb = "是" if p.get("browser_fallback_exe", False) else "否"
+            gt = "是" if p.get("browser_group_toggle", True) else "否"
+            act = "隐藏/恢复" if is_hide_action(p) else "切换/启动"
+            self.list_ctrl.Append(
+                [
+                    p.get("name", ""),
+                    p.get("hotkey", ""),
+                    act,
+                    p.get("match_mode", "title"),
+                    p.get("window_keyword", ""),
+                    str(int(p.get("bind_hwnd", 0) or 0)),
+                    p.get("profile_name", ""),
+                    p.get("title_sig", ""),
+                    fb,
+                    gt,
+                    p.get("path", ""),
+                ]
+            )
+
+    def update_status(self, s):
+        self.status.SetLabel(s)
+
+    def hide_to_tray(self):
+        self.Hide()
+        self.update_status("已最小化到托盘")
+
+    def show_from_tray(self):
+        self.Show()
+        self.Raise()
+        self.Iconize(False)
+        self.update_status("窗口已恢复")
+
+    def on_close(self, event):
+        if self.exiting:
+            self.restore_all_hidden_windows()
+            self.unregister_all_hotkeys()
+            if self.taskbar:
+                self.taskbar.RemoveIcon()
+                self.taskbar.Destroy()
+            event.Skip()
+        else:
+            event.Veto()
+            self.hide_to_tray()
+
+    def on_about(self, _):
+        info = wx.adv.AboutDialogInfo()
+        info.SetName(__app_name__)
+        info.SetVersion(__version__)
+        info.SetDescription(f"{__description__}\n\n作者：{__author__}\nGitHub：{__github__}")
+        info.SetWebSite(__github__)
+        info.AddDeveloper(__author__)
+        wx.adv.AboutBox(info)
+
+    def check_for_updates(self, _):
+        import urllib.request
+        import json as _json
+
         try:
-            update_last_active_cache()
-        except Exception:
-            pass
+            url = "https://api.github.com/repos/laozi4vip/QuickLauncher/releases/latest"
+            req = urllib.request.Request(url, headers={"User-Agent": "QuickLauncher"})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = _json.loads(response.read().decode())
+                latest_version = data.get("tag_name", "v1.0.0").lstrip("v")
+                current_version = __version__
 
-    def _on_cleanup_timer(self, _):
-        try:
-            self.hidden_mgr.cleanup_stale()
-        except Exception:
-            pass
+                def parse_version(v):
+                    parts = v.split(".")
+                    return [int(p) for p in parts] + [0] * (3 - len(parts))
 
-    # ---------- 热键注册 ----------
+                latest = parse_version(latest_version)
+                current = parse_version(current_version)
 
-    def _next_hotkey_id(self):
-        self._hotkey_id_counter += 1
-        return self._hotkey_id_counter
+                if latest > current:
+                    dlg = wx.Dialog(self, title="检查更新", size=(420, 190))
+                    panel = wx.Panel(dlg)
+                    sizer = wx.BoxSizer(wx.VERTICAL)
+                    sizer.Add(wx.StaticText(panel, label=f"当前版本：v{current_version}"), 0, wx.ALL, 10)
+                    sizer.Add(wx.StaticText(panel, label=f"最新版本：v{latest_version}"), 0, wx.ALL, 10)
+                    sizer.Add(wx.StaticText(panel, label="发现新版本！"), 0, wx.ALL, 10)
 
-    def _register_all_hotkeys(self):
-        self._unregister_all_hotkeys()
+                    btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+                    ok_btn = wx.Button(panel, label="前往下载")
+                    ok_btn.Bind(wx.EVT_BUTTON, lambda e: wx.LaunchDefaultBrowser(__github__ + "/releases"))
+                    btn_sizer.Add(ok_btn, 0, wx.ALL, 5)
+                    cancel_btn = wx.Button(panel, wx.ID_CANCEL, "关闭")
+                    btn_sizer.Add(cancel_btn, 0, wx.ALL, 5)
+                    sizer.Add(btn_sizer, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+
+                    panel.SetSizer(sizer)
+                    dlg.ShowModal()
+                    dlg.Destroy()
+                else:
+                    wx.MessageBox(f"当前已是最新版本 (v{current_version})", "检查更新", wx.OK | wx.ICON_INFORMATION)
+        except Exception as e:
+            wx.MessageBox(f"检查更新失败：{str(e)}", "错误", wx.OK | wx.ICON_ERROR)
+
+    def exit_app(self, _=None):
+        self.exiting = True
+        self.Close()
+
+    def on_apply_settings(self, _):
+        ok = set_autostart(self.autostart_cb.GetValue())
+        if not ok:
+            wx.MessageBox("开机自启设置失败", "错误", wx.OK | wx.ICON_ERROR)
+            self.autostart_cb.SetValue(is_autostart_enabled())
+            return
+        self.persist()
+        wx.MessageBox("设置已保存", "成功")
+
+    def _hide_window_and_taskbar(self, hwnd: int):
+        if not is_hwnd_valid(hwnd):
+            return None
+        old_ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        new_ex = (old_ex | WS_EX_TOOLWINDOW) & (~WS_EX_APPWINDOW)
+    
+        # 仅在确实变化时改样式
+        if new_ex != old_ex:
+            set_window_exstyle(hwnd, new_ex)
+    
+        # 已不可见就不重复 Hide
+        if user32.IsWindowVisible(hwnd):
+            user32.ShowWindow(hwnd, SW_HIDE)
+    
+        return {"hwnd": int(hwnd), "exstyle": int(old_ex)}
+    
+    def _restore_window_and_taskbar(self, item):
+        hwnd = int(item.get("hwnd", 0) or 0)
+        if not is_hwnd_valid(hwnd):
+            return False
+    
+        old_ex = int(item.get("exstyle", 0))
+        cur_ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if cur_ex != old_ex:
+            set_window_exstyle(hwnd, old_ex)
+    
+        user32.ShowWindow(hwnd, SW_SHOW)
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        return True
+    
+    def restore_all_hidden_windows(self):
+        keys = list(self.hidden_states.keys())
+        for k in keys:
+            state = self.hidden_states.get(k, {})
+            items = state.get("items", [])
+            for i, it in enumerate(items):
+                self._restore_window_and_taskbar(it)
+                if i % 6 == 5:
+                    wx.YieldIfNeeded()
+        self.hidden_states.clear()
+
+    def toggle_hide_for_program(self, idx, p):
+        key = int(idx)
+        state = self.hidden_states.get(key)
+
+        if state:
+            items = state.get("items", [])
+            restored_any = False
+            for i, it in enumerate(items):
+                if self._restore_window_and_taskbar(it):
+                    restored_any = True
+                if i % 3 == 2:
+                    time.sleep(0.02)
+            if restored_any and items:
+                try:
+                    user32.SetForegroundWindow(int(items[0].get("hwnd", 0) or 0))
+                except Exception:
+                    pass
+            self.hidden_states.pop(key, None)
+            return None, restored_any
+
+        hwnds = []
+        if is_browser_program(p) and browser_group_toggle_enabled(p):
+            hwnds = find_browser_group_windows(p)
+        else:
+            h = find_window_for_program(p)
+            if h:
+                hwnds = [h]
+
+        if not hwnds:
+            return None, False
+
+        hidden_items = []
+        for i, h in enumerate(hwnds):
+            it = self._hide_window_and_taskbar(h)
+            if it:
+                hidden_items.append(it)
+            if i % 6 == 5:
+                wx.YieldIfNeeded()
+
+        if not hidden_items:
+            return None, False
+
+        self.hidden_states[key] = {"items": hidden_items}
+        return hidden_items[0]["hwnd"], True
+
+    def get_used_hwnds_by_same_path(self, path, exclude_index=None):
+        used = set()
+        tpath = os.path.normcase(path or "")
         for i, p in enumerate(self.programs):
-            hk = p.get("hotkey", "")
+            if exclude_index is not None and i == exclude_index:
+                continue
+            ppath = os.path.normcase(p.get("path", "") or "")
+            if ppath != tpath:
+                continue
+            h = int(p.get("bind_hwnd", 0) or 0)
+            if h and is_hwnd_valid(h):
+                used.add(h)
+        return used
+
+    def auto_bind_program_if_needed(self, idx, windows_cache=None, save=False):
+        if idx < 0 or idx >= len(self.programs):
+            return False
+        p = self.programs[idx]
+        if (p.get("match_mode", "title") or "title").lower() != "hwnd":
+            return False
+    
+        current = int(p.get("bind_hwnd", 0) or 0)
+        path = p.get("path", "")
+        if not path:
+            return False
+    
+        if current and is_hwnd_valid(current):
+            pid = get_pid_from_hwnd(current)
+            cpath, _, _ = get_proc_path_name_cmdline(pid)
+            if os.path.normcase(cpath or "") == os.path.normcase(path or ""):
+                return False
+    
+        cands = windows_cache if windows_cache is not None else enum_windows_for_program(path)
+        if not cands:
+            return False
+    
+        used = self.get_used_hwnds_by_same_path(path, exclude_index=idx)
+        scored = []
+    
+        target_pf = _normalize_profile_text(p.get("profile_name", ""))
+    
+        for w in cands:
+            hwnd = int(w.get("hwnd", 0) or 0)
+            if not hwnd or hwnd in used or not is_hwnd_valid(hwnd):
+                continue
+    
+            if target_pf:
+                w_pf = _normalize_profile_text(w.get("profile", ""))
+                w_cmd_pf = _normalize_profile_text(
+                    parse_profile_from_cmdline(w.get("proc_name", ""), w.get("cmdline", []))
+                )
+                w_t_pf = _normalize_profile_text(
+                    parse_profile_from_title(w.get("proc_name", ""), w.get("title", ""))
+                )
+                if not any(_profile_match(target_pf, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x):
+                    continue
+    
+            s = score_window_for_program(p, w)
+            scored.append((s, hwnd, w))
+    
+        if not scored:
+            return False
+    
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_hwnd, best_w = scored[0]
+    
+        kw = (p.get("window_keyword", "") or "").strip()
+        pf = (p.get("profile_name", "") or "").strip()
+        ts = (p.get("title_sig", "") or "").strip()
+        if (kw or pf or ts) and best_score <= 0:
+            return False
+    
+        p["bind_hwnd"] = int(best_hwnd)
+        if not (p.get("title_sig", "") or "").strip():
+            p["title_sig"] = best_w.get("title_sig", "") or make_title_signature(best_w.get("title", ""))
+        if save:
+            self.persist()
+        return True
+
+
+    def auto_bind_unbound_same_browser(self, base_index):
+        if base_index < 0 or base_index >= len(self.programs):
+            return 0
+        base = self.programs[base_index]
+        path = base.get("path", "")
+        if not path:
+            return 0
+        cands = enum_windows_for_program(path)
+        if not cands:
+            return 0
+        changed = 0
+        for i, p in enumerate(self.programs):
+            if os.path.normcase(p.get("path", "") or "") != os.path.normcase(path or ""):
+                continue
+            if (p.get("match_mode", "title") or "title").lower() != "hwnd":
+                continue
+            if self.auto_bind_program_if_needed(i, windows_cache=cands, save=False):
+                changed += 1
+        if changed:
+            self.persist()
+            self.refresh_list()
+        return changed
+
+    def unregister_all_hotkeys(self):
+        for i in self.registered_hotkey_ids:
+            try:
+                # 关键：解除该 id 的 EVT_HOTKEY 绑定，防止潜在累积
+                self.Unbind(wx.EVT_HOTKEY, id=i)
+            except Exception:
+                pass
+            try:
+                self.UnregisterHotKey(i)
+            except Exception:
+                pass
+        self.registered_hotkey_ids.clear()
+        self.hotkey_id_to_index.clear()
+
+    def register_all_hotkeys(self):
+        self.unregister_all_hotkeys()
+        used = set()
+        fail = []
+        base_id = 1000
+        for idx, p in enumerate(self.programs):
+            hk = normalize_hotkey(p.get("hotkey", ""))
             if not hk:
                 continue
             try:
-                mod, vk, norm = hotkey_to_mod_vk(hk)
-                hid = self._next_hotkey_id()
-                ok = user32.RegisterHotKey(self.GetHandle(), hid, mod, vk)
-                if ok:
-                    self._hotkey_ids[hid] = (mod, vk, norm, i)
-                else:
-                    print(f"[WARN] 热键注册失败: {norm} (可能被占用)")
+                mods, vk, n = hotkey_to_mod_vk(hk)
+                self.programs[idx]["hotkey"] = n
             except Exception as e:
-                print(f"[WARN] 热键解析失败: {hk} -> {e}")
-
-    def _unregister_all_hotkeys(self):
-        for hid in list(self._hotkey_ids.keys()):
-            try:
-                user32.UnregisterHotKey(self.GetHandle(), hid)
-            except Exception:
-                pass
-        self._hotkey_ids.clear()
-
-    # ---------- 热键处理 [FIX: 防抖 + 无阻塞] ----------
+                fail.append(f"{p.get('name', '')}：{hk} ({e})")
+                continue
+            if n in used:
+                fail.append(f"{p.get('name', '')}：{n}（重复）")
+                continue
+            used.add(n)
+            hotkey_id = base_id + idx
+            if self.RegisterHotKey(hotkey_id, mods, vk):
+                self.registered_hotkey_ids.append(hotkey_id)
+                self.hotkey_id_to_index[hotkey_id] = idx
+                self.Bind(wx.EVT_HOTKEY, self.on_hotkey, id=hotkey_id)
+            else:
+                fail.append(f"{p.get('name', '')}：{n}（被占用）")
+        self.persist()
+        self.refresh_list()
+        if fail:
+            wx.MessageBox("以下快捷键注册失败：\n" + "\n".join(fail), "提示")
 
     def on_hotkey(self, event):
-        hid = event.GetId()
-        info = self._hotkey_ids.get(hid)
-        if not info:
+        idx = self.hotkey_id_to_index.get(event.GetId())
+        if idx is None or idx >= len(self.programs):
             return
-        _, _, norm, prog_idx = info
+        p = self.programs[idx]
 
-        # [FIX] 防抖：忽略过快的重复触发
-        now = time.time()
-        last = self._last_hotkey_ts.get(hid, 0.0)
-        if now - last < self.HOTKEY_DEBOUNCE:
-            return
-        self._last_hotkey_ts[hid] = now
-
-        if prog_idx < 0 or prog_idx >= len(self.programs):
+        if is_hide_action(p):
+            hwnd, acted = self.toggle_hide_for_program(idx, p)
+            if acted:
+                if idx in self.hidden_states:
+                    self.update_status(f"已隐藏：{p.get('name', '')}")
+                else:
+                    self.update_status(f"已恢复：{p.get('name', '')}")
             return
 
-        program = self.programs[prog_idx]
+        mode = (p.get("match_mode", "title") or "title").lower()
+        old_hwnd = int(p.get("bind_hwnd", 0) or 0)
 
-        # [FIX] 用 wx.CallAfter 确保不阻塞消息泵
-        wx.CallAfter(self._handle_hotkey_action, program)
+        if mode == "hwnd":
+            self.auto_bind_program_if_needed(idx, save=True)
+            old_hwnd = int(p.get("bind_hwnd", 0) or 0)
 
-    def _handle_hotkey_action(self, program):
-        """实际执行热键动作，在主线程事件循环中安全执行"""
-        try:
-            action = (program.get("hotkey_action", "toggle") or "toggle").strip().lower()
+        hwnd, acted = toggle_program(p)
 
-            if action == "hide":
-                self._do_hide_toggle(program)
-            else:
-                self._do_toggle(program)
-        except Exception as e:
-            print(f"[ERROR] hotkey action: {e}")
-        finally:
-            # [FIX] 操作完成后失效枚举缓存
-            invalidate_enum_cache()
-
-    def _make_hide_key(self, program):
-        """为 hide 动作生成唯一 key"""
-        path = os.path.normcase(program.get("path", ""))
-        profile = (program.get("profile_name", "") or "").strip().lower()
-        keyword = (program.get("window_keyword", "") or "").strip().lower()
-        return f"{path}|{profile}|{keyword}"
-
-    def _do_hide_toggle(self, program):
-        key = self._make_hide_key(program)
-
-        # 如果已隐藏则恢复
-        if self.hidden_mgr.is_hidden(key):
-            self.hidden_mgr.restore_windows(key)
+        if not acted:
             return
 
-        # 否则查找并隐藏
-        if is_browser_program(program) and browser_group_toggle_enabled(program):
-            group = find_browser_group_windows(program)
-            if group:
-                self.hidden_mgr.hide_windows(key, group)
-                return
-        else:
-            hwnd = find_window_for_program(program)
-            if hwnd and is_hwnd_valid(hwnd):
-                self.hidden_mgr.hide_windows(key, [hwnd])
-                return
+        changed = False
+        if mode == "hwnd":
+            keep_old = False
+            if old_hwnd and is_hwnd_valid(old_hwnd):
+                pid = get_pid_from_hwnd(old_hwnd)
+                cpath, _, _ = get_proc_path_name_cmdline(pid)
+                if os.path.normcase(cpath or "") == os.path.normcase(p.get("path", "") or ""):
+                    keep_old = True
+            if hwnd and not keep_old and hwnd != old_hwnd:
+                p["bind_hwnd"] = int(hwnd)
+                p["title_sig"] = make_title_signature(get_window_title(hwnd))
+                changed = True
 
-        # 没找到窗口，尝试启动
-        path = program.get("path", "")
-        args = program.get("args", "")
-        if path:
-            launch_program_by_path(path, args)
+            auto_cnt = self.auto_bind_unbound_same_browser(idx)
+            if auto_cnt > 0:
+                changed = True
 
-    def _do_toggle(self, program):
-        toggle_program(program)
+        if changed:
+            self.persist()
+            self.refresh_list()
+        self.update_status(f"已切换：{p.get('name', '')}")
 
-    # ---------- 列表操作 ----------
+    def on_manual_add(self, _):
+        dlg = wx.Dialog(self, title="手动添加", size=(820, 620))
+        panel = wx.Panel(dlg)
+        s = wx.BoxSizer(wx.VERTICAL)
 
-    def _get_selected_index(self):
-        return self.list_ctrl.GetFirstSelected()
+        def row(label, ctrl):
+            r = wx.BoxSizer(wx.HORIZONTAL)
+            r.Add(wx.StaticText(panel, label=label), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
+            r.Add(ctrl, 1, wx.ALL | wx.EXPAND, 6)
+            s.Add(r, 0, wx.EXPAND)
 
-    def on_add(self, _):
-        dlg = ProgramEditDialog(self, program=None)
+        name = wx.TextCtrl(panel)
+        path = wx.TextCtrl(panel)
+        args = wx.TextCtrl(panel)
+        action = wx.Choice(panel, choices=["切换/启动", "隐藏/恢复（窗口+任务栏图标）"])
+        action.SetStringSelection("切换/启动")
+        mode = wx.Choice(panel, choices=MATCH_MODES)
+        mode.SetStringSelection("program")
+        kw = wx.TextCtrl(panel)
+        hwnd = wx.TextCtrl(panel, value="0")
+        prof = wx.TextCtrl(panel)
+        tsig = wx.TextCtrl(panel)
+
+        fallback_cb = wx.CheckBox(panel, label="浏览器找不到窗口时，允许按 EXE 兜底启动")
+        fallback_cb.SetValue(False)
+
+        group_toggle_cb = wx.CheckBox(panel, label="同 Profile 多窗口联动（含隐私窗口）")
+        group_toggle_cb.SetValue(True)
+
+        row("名称:", name)
+        row("路径:", path)
+        row("启动参数:", args)
+        row("热键动作:", action)
+        row("模式:", mode)
+        row("关键词(Title):", kw)
+        row("绑定HWND:", hwnd)
+        row("Profile名:", prof)
+        row("TitleSig(可选):", tsig)
+        s.Add(fallback_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        s.Add(group_toggle_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
+        tip = wx.StaticText(panel, label="程序模式(program)：只按程序名/路径控制窗口放大或缩小，不需要填写其他匹配字段。")
+        tip.SetForegroundColour(wx.Colour(90, 90, 90))
+        s.Add(tip, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
+        b = wx.Button(panel, label="浏览exe")
+
+        def refresh_browser_options():
+            fake_program = {"path": path.GetValue().strip()}
+            is_b = is_browser_program(fake_program)
+            fallback_cb.Enable(is_b)
+            group_toggle_cb.Enable(is_b)
+            if not is_b:
+                fallback_cb.SetValue(False)
+                group_toggle_cb.SetValue(False)
+
+        def apply_mode_ui():
+            m = (mode.GetStringSelection() or "title").strip().lower()
+            kw.Enable(m == "title")
+            tsig.Enable(m == "title")
+            prof.Enable(m == "profile")
+            hwnd.Enable(m == "hwnd")
+            if m == "program":
+                kw.Enable(False)
+                tsig.Enable(False)
+                prof.Enable(False)
+                hwnd.Enable(False)
+
+        def browse(_e):
+            fd = wx.FileDialog(panel, "选择程序", wildcard="*.exe", style=wx.FD_OPEN)
+            if fd.ShowModal() == wx.ID_OK:
+                pth = fd.GetPath()
+                path.SetValue(pth)
+                if not name.GetValue().strip():
+                    name.SetValue(os.path.splitext(os.path.basename(pth))[0])
+                refresh_browser_options()
+            fd.Destroy()
+
+        path.Bind(wx.EVT_TEXT, lambda e: (refresh_browser_options(), e.Skip()))
+        mode.Bind(wx.EVT_CHOICE, lambda e: (apply_mode_ui(), e.Skip()))
+        b.Bind(wx.EVT_BUTTON, browse)
+        s.Add(b, 0, wx.ALL | wx.ALIGN_CENTER, 6)
+
+        btns = wx.StdDialogButtonSizer()
+        okb = wx.Button(panel, wx.ID_OK)
+        cb = wx.Button(panel, wx.ID_CANCEL)
+        btns.AddButton(okb)
+        btns.AddButton(cb)
+        btns.Realize()
+        s.Add(btns, 0, wx.ALL | wx.ALIGN_CENTER, 8)
+        panel.SetSizer(s)
+
+        refresh_browser_options()
+        apply_mode_ui()
+
         if dlg.ShowModal() == wx.ID_OK:
-            new_prog = dlg.get_program()
-            self.programs.append(new_prog)
-            self._save_and_refresh()
+            mode_val = (mode.GetStringSelection() or "title").strip().lower()
+            hwnd_val = 0
+            try:
+                hwnd_val = int((hwnd.GetValue() or "").strip() or "0")
+            except Exception:
+                hwnd_val = 0
+
+            p = {
+                "name": name.GetValue().strip(),
+                "path": path.GetValue().strip(),
+                "args": args.GetValue().strip(),
+                "hotkey": "",
+                "window_keyword": "",
+                "match_mode": mode_val if mode_val in MATCH_MODES else "title",
+                "bind_hwnd": 0,
+                "profile_name": "",
+                "title_sig": "",
+                "browser_fallback_exe": bool(fallback_cb.GetValue()),
+                "browser_group_toggle": bool(group_toggle_cb.GetValue()),
+                "hotkey_action": "hide" if action.GetStringSelection().startswith("隐藏/恢复") else "toggle",
+            }
+
+            if mode_val == "title":
+                p["window_keyword"] = kw.GetValue().strip()
+                p["title_sig"] = tsig.GetValue().strip()
+            elif mode_val == "profile":
+                p["profile_name"] = prof.GetValue().strip()
+            elif mode_val == "hwnd":
+                p["bind_hwnd"] = hwnd_val
+            elif mode_val == "program":
+                pass
+
+            if not p["name"] or not p["path"]:
+                wx.MessageBox("名称和路径必填", "提示")
+            elif not os.path.exists(p["path"]):
+                wx.MessageBox("路径不存在", "错误")
+            else:
+                if not is_browser_program(p):
+                    p["browser_fallback_exe"] = False
+                    p["browser_group_toggle"] = False
+                self.programs.append(p)
+                self.persist()
+                self.refresh_list()
+                self.register_all_hotkeys()
         dlg.Destroy()
 
-    def on_edit(self, _):
-        idx = self._get_selected_index()
-        if idx < 0:
-            wx.MessageBox("请先选择一项", "提示", wx.OK | wx.ICON_INFORMATION)
+    def on_add_from_running(self, _):
+        ws = enum_visible_app_windows()
+        if not ws:
+            wx.MessageBox("未找到运行窗口", "提示")
             return
-        dlg = ProgramEditDialog(self, program=self.programs[idx])
-        if dlg.ShowModal() == wx.ID_OK:
-            self.programs[idx] = dlg.get_program()
-            self._save_and_refresh()
+        ws = [w for w in ws if w.get("path", "").lower().endswith(".exe")]
+        ws.sort(key=lambda x: (x.get("title", "") or "").lower())
+
+        dlg = wx.Dialog(self, title="从运行窗口添加", size=(1040, 540))
+        panel = wx.Panel(dlg)
+        s = wx.BoxSizer(wx.VERTICAL)
+        tip = wx.StaticText(panel, label="双击添加：默认用 program 模式（仅按程序控制放大/缩小）")
+        s.Add(tip, 0, wx.ALL, 8)
+
+        lc = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
+        lc.InsertColumn(0, "标题", width=330)
+        lc.InsertColumn(1, "程序", width=110)
+        lc.InsertColumn(2, "Profile", width=120)
+        lc.InsertColumn(3, "HWND", width=90)
+        lc.InsertColumn(4, "路径", width=330)
+
+        rows = []
+        for w in ws:
+            pth = w["path"]
+            name = os.path.splitext(os.path.basename(pth))[0]
+            row = {
+                "name": name,
+                "path": pth,
+                "title": w.get("title", ""),
+                "profile": w.get("profile", ""),
+                "proc_name": w.get("proc_name", ""),
+                "hwnd": int(w.get("hwnd", 0)),
+                "title_sig": w.get("title_sig", ""),
+            }
+            rows.append(row)
+            i = lc.InsertItem(lc.GetItemCount(), row["title"] or "(无标题)")
+            lc.SetItem(i, 1, row["name"])
+            lc.SetItem(i, 2, row["profile"])
+            lc.SetItem(i, 3, str(row["hwnd"]))
+            lc.SetItem(i, 4, row["path"])
+
+        def on_dbl(_e):
+            i = lc.GetFirstSelected()
+            if i < 0:
+                return
+            it = rows[i]
+            proc = (it.get("proc_name", "") or "").lower().replace(".exe", "")
+            profile = (it.get("profile", "") or "").strip()
+
+            mode = "program"
+            kw = ""
+            args = ""
+            fallback = False
+            group_toggle = False
+
+            if proc in BROWSER_SET:
+                ok, m_profile = ask_profile_input(self, default_profile=profile)
+                if ok and m_profile:
+                    args = build_profile_args(proc, m_profile)
+
+                ask = wx.MessageBox(
+                    "浏览器找不到匹配窗口时，是否允许按 EXE 启动？",
+                    "浏览器 EXE 兜底",
+                    wx.YES_NO | wx.ICON_QUESTION,
+                )
+                fallback = ask == wx.YES
+
+                ask2 = wx.MessageBox(
+                    "是否启用“同 Profile 多窗口联动（含隐私窗口）”？",
+                    "浏览器组联动",
+                    wx.YES_NO | wx.ICON_QUESTION,
+                )
+                group_toggle = ask2 == wx.YES
+
+            self.programs.append(
+                {
+                    "name": it["name"],
+                    "path": it["path"],
+                    "args": args,
+                    "hotkey": "",
+                    "window_keyword": kw,
+                    "match_mode": mode,
+                    "bind_hwnd": 0,
+                    "profile_name": "",
+                    "title_sig": "",
+                    "browser_fallback_exe": fallback,
+                    "browser_group_toggle": group_toggle,
+                    "hotkey_action": "toggle",
+                }
+            )
+            self.persist()
+            self.refresh_list()
+            self.register_all_hotkeys()
+            dlg.EndModal(wx.ID_OK)
+
+        lc.Bind(wx.EVT_LIST_ITEM_ACTIVATED, on_dbl)
+        s.Add(lc, 1, wx.ALL | wx.EXPAND, 8)
+
+        close_btn = wx.Button(panel, wx.ID_CANCEL, "关闭")
+        close_btn.Bind(wx.EVT_BUTTON, lambda e: dlg.EndModal(wx.ID_CANCEL))
+        s.Add(close_btn, 0, wx.ALL | wx.ALIGN_CENTER, 6)
+        panel.SetSizer(s)
+
+        dlg.ShowModal()
         dlg.Destroy()
 
     def on_delete(self, _):
-        idx = self._get_selected_index()
+        idx = self.list_ctrl.GetFirstSelected()
         if idx < 0:
-            wx.MessageBox("请先选择一项", "提示", wx.OK | wx.ICON_INFORMATION)
+            wx.MessageBox("请先选择", "提示")
             return
-        name = self.programs[idx].get("name", "(未命名)")
-        if wx.MessageBox(f"确认删除「{name}」？", "确认", wx.YES_NO | wx.ICON_QUESTION) == wx.YES:
-            self.programs.pop(idx)
-            self._save_and_refresh()
+        self.hidden_states.pop(int(idx), None)
+        self.programs.pop(idx)
+        self.persist()
+        self.refresh_list()
+        self.register_all_hotkeys()
 
-    def on_move_up(self, _):
-        idx = self._get_selected_index()
-        if idx <= 0:
+    def on_set_hotkey(self, _):
+        idx = self.list_ctrl.GetFirstSelected()
+        if idx < 0:
+            wx.MessageBox("请先选择程序", "提示")
             return
-        self.programs[idx - 1], self.programs[idx] = self.programs[idx], self.programs[idx - 1]
-        self._save_and_refresh()
-        self.list_ctrl.Select(idx - 1)
-
-    def on_move_down(self, _):
-        idx = self._get_selected_index()
-        if idx < 0 or idx >= len(self.programs) - 1:
-            return
-        self.programs[idx], self.programs[idx + 1] = self.programs[idx + 1], self.programs[idx]
-        self._save_and_refresh()
-        self.list_ctrl.Select(idx + 1)
-
-    def on_autostart_toggle(self, _):
-        self.autostart = self.cb_autostart.GetValue()
-        set_autostart(self.autostart)
-        self._save_config_only()
-
-    def _save_and_refresh(self):
-        save_config(self.programs, self.autostart)
-        self._refresh_list()
-        self._register_all_hotkeys()
-
-    def _save_config_only(self):
-        save_config(self.programs, self.autostart)
-
-    # ---------- 窗口显示/隐藏 ----------
-
-    def show_main_window(self):
-        if self.IsIconized():
-            self.Iconize(False)
-        self.Show()
-        self.Raise()
-
-    def on_close(self, event):
-        """关闭窗口时最小化到托盘"""
-        if event.CanVeto():
-            event.Veto()
-            self.Hide()
-        else:
-            self._do_quit()
-
-    def on_quit(self, _):
-        dlg = wx.MessageDialog(
-            self, "确定退出 QuickLauncher？", "退出确认",
-            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
-        )
-        if dlg.ShowModal() == wx.YES:
-            self._do_quit()
-        dlg.Destroy()
-
-    def _do_quit(self):
-        """[FIX] 安全退出：先停定时器、注销热键、恢复隐藏窗口"""
-        try:
-            self._stop_timers()
-        except Exception:
-            pass
-        try:
-            self._unregister_all_hotkeys()
-        except Exception:
-            pass
-        try:
-            self.hidden_mgr.restore_all()
-        except Exception:
-            pass
-        try:
-            self.taskbar.RemoveIcon()
-            self.taskbar.Destroy()
-        except Exception:
-            pass
-        self.Destroy()
-        wx.GetApp().ExitMainLoop()
-
-
-# ---------------------------
-# 程序编辑对话框
-# ---------------------------
-class ProgramEditDialog(wx.Dialog):
-    def __init__(self, parent, program=None):
-        super().__init__(
-            parent,
-            title="编辑程序" if program else "添加程序",
-            size=(560, 520),
-            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
-        )
-        self.program = program or {}
-        self.Centre()
-        self._build_ui()
-
-    def _build_ui(self):
-        panel = wx.Panel(self)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        grid = wx.FlexGridSizer(cols=3, hgap=8, vgap=8)
-        grid.AddGrowableCol(1, 1)
-
-        # 名称
-        grid.Add(wx.StaticText(panel, label="名称："), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.txt_name = wx.TextCtrl(panel, value=self.program.get("name", ""))
-        grid.Add(self.txt_name, 1, wx.EXPAND)
-        grid.AddSpacer(0)
-
-        # 路径
-        grid.Add(wx.StaticText(panel, label="程序路径："), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.txt_path = wx.TextCtrl(panel, value=self.program.get("path", ""))
-        grid.Add(self.txt_path, 1, wx.EXPAND)
-        btn_browse = wx.Button(panel, label="浏览…")
-        btn_browse.Bind(wx.EVT_BUTTON, self.on_browse)
-        grid.Add(btn_browse, 0)
-
-        # 参数
-        grid.Add(wx.StaticText(panel, label="启动参数："), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.txt_args = wx.TextCtrl(panel, value=self.program.get("args", ""))
-        grid.Add(self.txt_args, 1, wx.EXPAND)
-        grid.AddSpacer(0)
-
-        # 快捷键
-        grid.Add(wx.StaticText(panel, label="快捷键："), 0, wx.ALIGN_CENTER_VERTICAL)
-        hk_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.txt_hotkey = wx.TextCtrl(
-            panel, value=self.program.get("hotkey", ""), style=wx.TE_READONLY
-        )
-        hk_row.Add(self.txt_hotkey, 1, wx.EXPAND)
-        btn_capture = wx.Button(panel, label="录入")
-        btn_capture.Bind(wx.EVT_BUTTON, self.on_capture_hotkey)
-        hk_row.Add(btn_capture, 0, wx.LEFT, 4)
-        grid.Add(hk_row, 1, wx.EXPAND)
-        grid.AddSpacer(0)
-
-        # 匹配模式
-        grid.Add(wx.StaticText(panel, label="匹配模式："), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.ch_mode = wx.Choice(panel, choices=MATCH_MODES)
-        cur_mode = self.program.get("match_mode", "title")
-        if cur_mode in MATCH_MODES:
-            self.ch_mode.SetSelection(MATCH_MODES.index(cur_mode))
-        else:
-            self.ch_mode.SetSelection(0)
-        grid.Add(self.ch_mode, 1, wx.EXPAND)
-        grid.AddSpacer(0)
-
-        # 窗口关键字
-        grid.Add(wx.StaticText(panel, label="窗口关键字："), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.txt_keyword = wx.TextCtrl(panel, value=self.program.get("window_keyword", ""))
-        grid.Add(self.txt_keyword, 1, wx.EXPAND)
-        grid.AddSpacer(0)
-
-        # Profile
-        grid.Add(wx.StaticText(panel, label="Profile："), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.txt_profile = wx.TextCtrl(panel, value=self.program.get("profile_name", ""))
-        grid.Add(self.txt_profile, 1, wx.EXPAND)
-        grid.AddSpacer(0)
-
-        # 动作
-        grid.Add(wx.StaticText(panel, label="热键动作："), 0, wx.ALIGN_CENTER_VERTICAL)
-        self.ch_action = wx.Choice(panel, choices=["toggle", "hide"])
-        cur_action = self.program.get("hotkey_action", "toggle")
-        self.ch_action.SetSelection(1 if cur_action == "hide" else 0)
-        grid.Add(self.ch_action, 1, wx.EXPAND)
-        grid.AddSpacer(0)
-
-        sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 12)
-
-        # 浏览器选项
-        browser_box = wx.StaticBox(panel, label="浏览器选项")
-        bsizer = wx.StaticBoxSizer(browser_box, wx.VERTICAL)
-        self.cb_fallback = wx.CheckBox(panel, label="未找到窗口时启动新实例")
-        self.cb_fallback.SetValue(self.program.get("browser_fallback_exe", False))
-        bsizer.Add(self.cb_fallback, 0, wx.ALL, 4)
-        self.cb_group = wx.CheckBox(panel, label="按组切换所有同 exe 窗口")
-        self.cb_group.SetValue(self.program.get("browser_group_toggle", True))
-        bsizer.Add(self.cb_group, 0, wx.ALL, 4)
-        sizer.Add(bsizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-
-        # 按钮
-        btn_sizer = self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL)
-        sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 12)
-
-        panel.SetSizer(sizer)
-
-    def on_browse(self, _):
-        dlg = wx.FileDialog(
-            self, "选择程序", wildcard="可执行文件 (*.exe)|*.exe|所有文件|*.*",
-            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
-        )
+        dlg = HotkeyCaptureDialog(self, self.programs[idx].get("hotkey", ""))
         if dlg.ShowModal() == wx.ID_OK:
-            self.txt_path.SetValue(dlg.GetPath())
-            if not self.txt_name.GetValue().strip():
-                base = os.path.splitext(os.path.basename(dlg.GetPath()))[0]
-                self.txt_name.SetValue(base)
+            hk = normalize_hotkey(dlg.captured_hotkey)
+            if not hk:
+                self.programs[idx]["hotkey"] = ""
+            else:
+                try:
+                    _, _, n = hotkey_to_mod_vk(hk)
+                except Exception as e:
+                    wx.MessageBox(f"快捷键无效: {e}", "错误")
+                    dlg.Destroy()
+                    return
+                for i, p in enumerate(self.programs):
+                    if i != idx and normalize_hotkey(p.get("hotkey", "")) == n:
+                        wx.MessageBox("快捷键重复", "错误")
+                        dlg.Destroy()
+                        return
+                self.programs[idx]["hotkey"] = n
+            self.persist()
+            self.refresh_list()
+            self.register_all_hotkeys()
         dlg.Destroy()
 
-    def on_capture_hotkey(self, _):
-        dlg = HotkeyCaptureDialog(self, self.txt_hotkey.GetValue())
+    def on_set_match(self, _):
+        idx = self.list_ctrl.GetFirstSelected()
+        if idx < 0:
+            wx.MessageBox("请先选择程序", "提示")
+            return
+        p = self.programs[idx]
+        dlg = wx.Dialog(self, title="设置匹配", size=(700, 560))
+        panel = wx.Panel(dlg)
+        s = wx.BoxSizer(wx.VERTICAL)
+
+        action = wx.Choice(panel, choices=["切换/启动", "隐藏/恢复（窗口+任务栏图标）"])
+        action.SetStringSelection("隐藏/恢复（窗口+任务栏图标）" if is_hide_action(p) else "切换/启动")
+
+        mode = wx.Choice(panel, choices=MATCH_MODES)
+        m0 = p.get("match_mode", "title")
+        mode.SetStringSelection(m0 if m0 in MATCH_MODES else "title")
+
+        kw = wx.TextCtrl(panel, value=p.get("window_keyword", ""))
+        hwnd = wx.TextCtrl(panel, value=str(int(p.get("bind_hwnd", 0) or 0)))
+        prof = wx.TextCtrl(panel, value=p.get("profile_name", ""))
+        tsig = wx.TextCtrl(panel, value=p.get("title_sig", ""))
+
+        fallback_cb = wx.CheckBox(panel, label="浏览器找不到窗口时，允许 EXE 兜底启动")
+        fallback_cb.SetValue(bool(p.get("browser_fallback_exe", False)))
+
+        group_toggle_cb = wx.CheckBox(panel, label="同 Profile 多窗口联动（含隐私窗口）")
+        group_toggle_cb.SetValue(bool(p.get("browser_group_toggle", True)))
+
+        is_b = is_browser_program(p)
+        fallback_cb.Enable(is_b)
+        group_toggle_cb.Enable(is_b)
+
+        for lab, ctrl in [
+            ("热键动作:", action),
+            ("模式:", mode),
+            ("关键词(Title):", kw),
+            ("绑定HWND:", hwnd),
+            ("Profile名:", prof),
+            ("TitleSig(可选):", tsig),
+        ]:
+            r = wx.BoxSizer(wx.HORIZONTAL)
+            r.Add(wx.StaticText(panel, label=lab), 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
+            r.Add(ctrl, 1, wx.ALL | wx.EXPAND, 6)
+            s.Add(r, 0, wx.EXPAND)
+
+        s.Add(fallback_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        s.Add(group_toggle_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
+        tip = wx.StaticText(panel, label="只需填写当前模式信息：title=关键词(+可选TitleSig), profile=Profile名, hwnd=绑定HWND, program=都不填")
+        tip.SetForegroundColour(wx.Colour(100, 100, 100))
+        s.Add(tip, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        def apply_mode_ui():
+            m = (mode.GetStringSelection() or "title").strip().lower()
+            kw.Enable(m == "title")
+            tsig.Enable(m == "title")
+            prof.Enable(m == "profile")
+            hwnd.Enable(m == "hwnd")
+            if m == "program":
+                kw.Enable(False)
+                tsig.Enable(False)
+                prof.Enable(False)
+                hwnd.Enable(False)
+
+        mode.Bind(wx.EVT_CHOICE, lambda e: (apply_mode_ui(), e.Skip()))
+        apply_mode_ui()
+
+        btns = wx.StdDialogButtonSizer()
+        okb = wx.Button(panel, wx.ID_OK)
+        cb = wx.Button(panel, wx.ID_CANCEL)
+        btns.AddButton(okb)
+        btns.AddButton(cb)
+        btns.Realize()
+        s.Add(btns, 0, wx.ALL | wx.ALIGN_CENTER, 8)
+        panel.SetSizer(s)
+
         if dlg.ShowModal() == wx.ID_OK:
-            self.txt_hotkey.SetValue(dlg.captured_hotkey)
+            mode_val = (mode.GetStringSelection() or "title").strip().lower()
+            p["hotkey_action"] = "hide" if action.GetStringSelection().startswith("隐藏/恢复") else "toggle"
+            p["match_mode"] = mode_val if mode_val in MATCH_MODES else "title"
+
+            p["window_keyword"] = ""
+            p["profile_name"] = ""
+            p["title_sig"] = ""
+            p["bind_hwnd"] = 0
+
+            if mode_val == "title":
+                p["window_keyword"] = kw.GetValue().strip()
+                p["title_sig"] = tsig.GetValue().strip()
+            elif mode_val == "profile":
+                p["profile_name"] = prof.GetValue().strip()
+            elif mode_val == "hwnd":
+                try:
+                    p["bind_hwnd"] = int(hwnd.GetValue().strip() or "0")
+                except Exception:
+                    p["bind_hwnd"] = 0
+            elif mode_val == "program":
+                pass
+
+            if is_browser_program(p):
+                p["browser_fallback_exe"] = bool(fallback_cb.GetValue())
+                p["browser_group_toggle"] = bool(group_toggle_cb.GetValue())
+            else:
+                p["browser_fallback_exe"] = False
+                p["browser_group_toggle"] = False
+
+            self.persist()
+            self.refresh_list()
+            wx.MessageBox("已保存", "成功")
         dlg.Destroy()
 
-    def get_program(self) -> dict:
-        mode = MATCH_MODES[self.ch_mode.GetSelection()]
-        action = "hide" if self.ch_action.GetSelection() == 1 else "toggle"
-        return {
-            "name": self.txt_name.GetValue().strip(),
-            "path": self.txt_path.GetValue().strip(),
-            "args": self.txt_args.GetValue().strip(),
-            "hotkey": normalize_hotkey(self.txt_hotkey.GetValue()),
-            "window_keyword": self.txt_keyword.GetValue().strip(),
-            "match_mode": mode,
-            "bind_hwnd": int(self.program.get("bind_hwnd", 0) or 0),
-            "profile_name": self.txt_profile.GetValue().strip(),
-            "title_sig": self.program.get("title_sig", ""),
-            "browser_fallback_exe": self.cb_fallback.GetValue(),
-            "browser_group_toggle": self.cb_group.GetValue(),
-            "hotkey_action": action,
-        }
 
-
-# ---------------------------
-# 主入口
-# ---------------------------
-def main():
-    start_in_tray = "--tray" in sys.argv
-
-    app = wx.App(False)
-
-    # 单实例检测
-    instance_name = f"{__app_name__}_SingleInstance_Mutex"
-    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, instance_name)
-    last_err = ctypes.windll.kernel32.GetLastError()
-    if last_err == 183:  # ERROR_ALREADY_EXISTS
-        wx.MessageBox(
-            f"{__app_name__} 已在运行中。",
-            "提示", wx.OK | wx.ICON_INFORMATION,
-        )
-        return
-
-    frame = QuickLauncherFrame(start_hidden=start_in_tray)
-    app.MainLoop()
+class QuickLauncherApp(wx.App):
+    def OnInit(self):
+        self.frame = QuickLauncherFrame()
+    
+        start_in_tray = any(arg.lower() in ("--tray", "/tray") for arg in sys.argv[1:])
+        if start_in_tray:
+            self.frame.hide_to_tray()
+        else:
+            self.frame.Show()
+    
+        return True
 
 
 if __name__ == "__main__":
-    main()
+    app = QuickLauncherApp()
+    app.MainLoop()
