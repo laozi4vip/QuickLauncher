@@ -1087,7 +1087,7 @@ def get_icon_path():
 # 第二部分（GUI 类 + 主入口）
 # ======================================================
 
-class HotkeyCaptureDialogclass HotkeyCaptureDialog(wx.Dialog):
+class HotkeyCaptureDialog(wx.Dialog):
     def __init__(self, parent, current_hotkey=""):
         super().__init__(parent, title="设置快捷键", size=(460, 220))
         self.captured_hotkey = normalize_hotkey(current_hotkey)
@@ -1402,31 +1402,29 @@ class QuickLauncherFrame(wx.Frame):
             return None
         old_ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         new_ex = (old_ex | WS_EX_TOOLWINDOW) & (~WS_EX_APPWINDOW)
-    
-        # 仅在确实变化时改样式
+
         if new_ex != old_ex:
             set_window_exstyle(hwnd, new_ex)
-    
-        # 已不可见就不重复 Hide
+
         if user32.IsWindowVisible(hwnd):
             user32.ShowWindow(hwnd, SW_HIDE)
-    
+
         return {"hwnd": int(hwnd), "exstyle": int(old_ex)}
-    
+
     def _restore_window_and_taskbar(self, item):
         hwnd = int(item.get("hwnd", 0) or 0)
         if not is_hwnd_valid(hwnd):
             return False
-    
+
         old_ex = int(item.get("exstyle", 0))
         cur_ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         if cur_ex != old_ex:
             set_window_exstyle(hwnd, old_ex)
-    
+
         user32.ShowWindow(hwnd, SW_SHOW)
         user32.ShowWindow(hwnd, SW_RESTORE)
         return True
-    
+
     def restore_all_hidden_windows(self):
         keys = list(self.hidden_states.keys())
         for k in keys:
@@ -1503,32 +1501,32 @@ class QuickLauncherFrame(wx.Frame):
         p = self.programs[idx]
         if (p.get("match_mode", "title") or "title").lower() != "hwnd":
             return False
-    
+
         current = int(p.get("bind_hwnd", 0) or 0)
         path = p.get("path", "")
         if not path:
             return False
-    
+
         if current and is_hwnd_valid(current):
             pid = get_pid_from_hwnd(current)
             cpath, _, _ = get_proc_path_name_cmdline(pid)
             if os.path.normcase(cpath or "") == os.path.normcase(path or ""):
                 return False
-    
+
         cands = windows_cache if windows_cache is not None else enum_windows_for_program(path)
         if not cands:
             return False
-    
+
         used = self.get_used_hwnds_by_same_path(path, exclude_index=idx)
         scored = []
-    
+
         target_pf = _normalize_profile_text(p.get("profile_name", ""))
-    
+
         for w in cands:
             hwnd = int(w.get("hwnd", 0) or 0)
             if not hwnd or hwnd in used or not is_hwnd_valid(hwnd):
                 continue
-    
+
             if target_pf:
                 w_pf = _normalize_profile_text(w.get("profile", ""))
                 w_cmd_pf = _normalize_profile_text(
@@ -1539,29 +1537,28 @@ class QuickLauncherFrame(wx.Frame):
                 )
                 if not any(_profile_match(target_pf, x) for x in (w_pf, w_cmd_pf, w_t_pf) if x):
                     continue
-    
+
             s = score_window_for_program(p, w)
             scored.append((s, hwnd, w))
-    
+
         if not scored:
             return False
-    
+
         scored.sort(key=lambda x: x[0], reverse=True)
         best_score, best_hwnd, best_w = scored[0]
-    
+
         kw = (p.get("window_keyword", "") or "").strip()
         pf = (p.get("profile_name", "") or "").strip()
         ts = (p.get("title_sig", "") or "").strip()
         if (kw or pf or ts) and best_score <= 0:
             return False
-    
+
         p["bind_hwnd"] = int(best_hwnd)
         if not (p.get("title_sig", "") or "").strip():
             p["title_sig"] = best_w.get("title_sig", "") or make_title_signature(best_w.get("title", ""))
         if save:
             self.persist()
         return True
-
 
     def auto_bind_unbound_same_browser(self, base_index):
         if base_index < 0 or base_index >= len(self.programs):
@@ -1589,7 +1586,6 @@ class QuickLauncherFrame(wx.Frame):
     def unregister_all_hotkeys(self):
         for i in self.registered_hotkey_ids:
             try:
-                # 关键：解除该 id 的 EVT_HOTKEY 绑定，防止潜在累积
                 self.Unbind(wx.EVT_HOTKEY, id=i)
             except Exception:
                 pass
@@ -1805,8 +1801,6 @@ class QuickLauncherFrame(wx.Frame):
                 p["profile_name"] = prof.GetValue().strip()
             elif mode_val == "hwnd":
                 p["bind_hwnd"] = hwnd_val
-            elif mode_val == "program":
-                pass
 
             if not p["name"] or not p["path"]:
                 wx.MessageBox("名称和路径必填", "提示")
@@ -2063,8 +2057,6 @@ class QuickLauncherFrame(wx.Frame):
                     p["bind_hwnd"] = int(hwnd.GetValue().strip() or "0")
                 except Exception:
                     p["bind_hwnd"] = 0
-            elif mode_val == "program":
-                pass
 
             if is_browser_program(p):
                 p["browser_fallback_exe"] = bool(fallback_cb.GetValue())
@@ -2082,16 +2074,17 @@ class QuickLauncherFrame(wx.Frame):
 class QuickLauncherApp(wx.App):
     def OnInit(self):
         self.frame = QuickLauncherFrame()
-    
+
         start_in_tray = any(arg.lower() in ("--tray", "/tray") for arg in sys.argv[1:])
         if start_in_tray:
             self.frame.hide_to_tray()
         else:
             self.frame.Show()
-    
+
         return True
 
 
 if __name__ == "__main__":
     app = QuickLauncherApp()
     app.MainLoop()
+
