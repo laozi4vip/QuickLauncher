@@ -68,6 +68,7 @@ LAST_ACTIVE_PROFILE_HWND = {}
 
 _browser_main_map_cache = {}
 _browser_main_map_ts = 0.0
+CACHE_TTL = 300.0  # 缓存有效期延长至 5 分钟
 
 
 # ---------------------------
@@ -455,7 +456,7 @@ def build_browser_main_proc_map():
     return main_map
 
 
-def get_cached_browser_main_map(max_age=3.0):
+def get_cached_browser_main_map(max_age=CACHE_TTL):
     global _browser_main_map_cache, _browser_main_map_ts
     now = time.time()
     if now - _browser_main_map_ts < max_age and _browser_main_map_cache:
@@ -1078,7 +1079,7 @@ class QuickLauncherFrame(wx.Frame):
         self.fg_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_timer, self.fg_timer)
         self._last_fg_hwnd = 0
-        self.fg_timer.Start(5000)
+        self.fg_timer.Start(60000) # 降低心跳频率至 60s，减少对系统的压力
 
     def on_timer(self, _):
         hwnd = user32.GetForegroundWindow()
@@ -1298,6 +1299,7 @@ class QuickLauncherFrame(wx.Frame):
             items = state.get("items", [])
             for i, it in enumerate(items):
                 self._restore_window_and_taskbar(it)
+                time.sleep(0.05)  # 给 Shell 留出处理时间，防止死锁
                 if i % 6 == 5:
                     wx.YieldIfNeeded()
         self.hidden_states.clear()
@@ -1338,6 +1340,7 @@ class QuickLauncherFrame(wx.Frame):
             it = self._hide_window_and_taskbar(h)
             if it:
                 hidden_items.append(it)
+            time.sleep(0.05)  # 给 Shell 留出处理时间，防止死锁
             if i % 6 == 5:
                 wx.YieldIfNeeded()
 
